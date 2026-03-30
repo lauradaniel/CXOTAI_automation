@@ -18,6 +18,10 @@
  *   Remove  — removes the item (confirms the popup)
  *   Move    — moves the item to the destination in "Required Change"
  *   Merge   — merges the item with the target in "Required Change"
+ *
+ * "Required Change" for Move/Merge supports two formats:
+ *   Plain name:          "Payment Processing"          (searched across all levels)
+ *   Path (recommended):  "BILLING & PAYMENT > Payment Processing"
  */
 
 (async function intentBuilderAutomation() {
@@ -29,7 +33,7 @@
     shortDelay:  400,
     actionDelay: 700,
     dialogDelay: 1200,
-    waitTimeout: 8000,
+    waitTimeout: 10000,  // slightly longer for dialog tree
     scrollDelay: 300,
   };
 
@@ -158,7 +162,7 @@
 
 
   // ─────────────────────────────────────────────
-  // TREE NAVIGATION
+  // TREE NAVIGATION  (shared by main tree and dialog tree)
   // ─────────────────────────────────────────────
 
   const normalize = s => (s || '').trim().toLowerCase();
@@ -170,19 +174,8 @@
 
   /**
    * Returns the <ul> that holds the direct children of a treeitem.
-   *
-   * PrimeNG renders its tree like this:
-   *
-   *   <p-treenode>                         ← Angular wrapper
-   *     <li role="treeitem">               ← the item we hold a ref to
-   *       <div class="p-treenode-content">
-   *     </li>
-   *     <ul class="p-treenode-children">   ← SIBLING of li, NOT inside it
-   *       <p-treenode>...
-   *     </ul>
-   *   </p-treenode>
-   *
-   * We check inside the li first (standard HTML), then the sibling pattern.
+   * Handles both standard HTML (ul inside li) and PrimeNG's sibling pattern
+   * (ul is a sibling of li inside a <p-treenode> wrapper).
    */
   function getChildrenContainer(li) {
     const inner = li.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
@@ -196,17 +189,19 @@
   }
 
   /**
-   * Finds a treeitem by name at the given level.
-   * Scopes the search to the children container of parentLi when provided.
+   * Finds a treeitem by name at the given aria-level.
+   * - parentLi: scope search to that node's children container.
+   * - rootScope: when parentLi is null, use this element instead of document
+   *   (useful for scoping to a dialog).
    */
-  function findItem(name, level, parentLi = null) {
+  function findItem(name, level, parentLi = null, rootScope = document) {
     const n = normalize(name);
     let scope;
     if (parentLi) {
       scope = getChildrenContainer(parentLi);
       if (!scope) return null;
     } else {
-      scope = document;
+      scope = rootScope;
     }
     for (const li of scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`)) {
       if (getItemName(li) === n) return li;
@@ -215,66 +210,159 @@
   }
 
   /**
-   * Scrolls a treeitem into view, then expands it if it is not already open.
-   *
-   * KEY FIX: the skip condition is now `=== 'true'` (explicitly expanded).
-   * Previously it was `!== 'false'`, which also returned early when the
-   * attribute was null — i.e. nodes that had never been interacted with
-   * on a fresh page load, causing all expansions to be silently skipped.
+   * Expands a treeitem if not already open.
+   * Uses `=== 'true'` so nodes with aria-expanded=null (never interacted with
+   * on a fresh page load) are also expanded.
    */
   async function expandItem(li) {
     await scrollIntoView(li);
-
-    // Only skip if the node is confirmed open. null / 'false' / absent → expand.
-    if (li.getAttribute('aria-expanded') === 'true') return;
-
+    if (li.getAttribute('aria-expanded') === 'true') return; // confirmed open
     const toggler = li.querySelector('button.p-tree-toggler');
-    if (!toggler) return; // leaf node — nothing to expand
-
+    if (!toggler) return; // leaf node
     toggler.click();
-
-    // Wait until the attribute confirms expansion AND the children <ul>
-    // exists in the DOM (PrimeNG adds it via *ngIf, not display:none).
     await waitFor(() => {
       const open        = li.getAttribute('aria-expanded') === 'true';
       const hasChildren = !!getChildrenContainer(li);
       return (open && hasChildren) ? li : null;
     }, CFG.waitTimeout).catch(() => null);
-
     await sleep(CFG.shortDelay);
   }
 
   /**
-   * Resolves the correct treeitem for a CSV row by navigating
-   * Category → Topic → Intent, expanding collapsed nodes as needed.
+   * Navigates the main tree to find the target item for a CSV row.
+   * Expands Category → Topic → Intent as needed.
    */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
-    // ── Level 1: Category (always visible) ──
     const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
     if (!catItem) { log(`Category not found: "${category}"`, 'error'); return null; }
     if (!topic) return catItem;
 
-    // ── Level 2: expand category, wait for topic ──
     await expandItem(catItem);
-    const topicItem = await waitFor(
-      () => findItem(topic, 2, catItem), CFG.waitTimeout
-    ).catch(() => null);
+    const topicItem = await waitFor(() => findItem(topic, 2, catItem), CFG.waitTimeout).catch(() => null);
     if (!topicItem) { log(`Topic not found: "${topic}" under "${category}"`, 'error'); return null; }
     if (!intent) return topicItem;
 
-    // ── Level 3: expand topic, wait for intent ──
     await expandItem(topicItem);
-    const intentItem = await waitFor(
-      () => findItem(intent, 3, topicItem), CFG.waitTimeout
-    ).catch(() => null);
+    const intentItem = await waitFor(() => findItem(intent, 3, topicItem), CFG.waitTimeout).catch(() => null);
     if (!intentItem) { log(`Intent not found: "${intent}" under "${topic}" > "${category}"`, 'error'); return null; }
 
     await scrollIntoView(intentItem);
     return intentItem;
+  }
+
+
+  // ─────────────────────────────────────────────
+  // DIALOG TREE NAVIGATION  (Move / Merge popup)
+  // ─────────────────────────────────────────────
+
+  /**
+   * Locates and clicks the destination node inside the Move/Merge dialog.
+   *
+   * The dialog contains the same PrimeNG tree (fully collapsed by default).
+   * We expand it the same way we expand the main tree.
+   *
+   * destination format ("Required Change" column):
+   *   Path (preferred): "CATEGORY > Topic"  or  "CATEGORY > Topic > Intent"
+   *   Plain name:       "Topic Name"   (scans all levels until found)
+   */
+  async function selectDestinationInDialog(destination) {
+    // Wait for the dialog and its tree to be ready
+    const dialog = await waitFor(() =>
+      document.querySelector('p-dialog, .p-dialog, [role="dialog"], mat-dialog-container'),
+      CFG.waitTimeout
+    );
+    await sleep(CFG.shortDelay); // small buffer for tree to render
+
+    const parts = destination.split('>').map(s => s.trim()).filter(Boolean);
+
+    if (parts.length > 1) {
+      // ── Path-based navigation ──
+      await navigateDialogByPath(dialog, parts);
+    } else {
+      // ── Single name: expand tree level by level to find it ──
+      await navigateDialogByName(dialog, destination);
+    }
+  }
+
+  /**
+   * Navigate using an explicit path array, e.g. ["CATEGORY", "Topic", "Intent"].
+   * Clicks the last element in the path.
+   */
+  async function navigateDialogByPath(dialog, parts) {
+    // Level 1
+    const l1 = await waitFor(
+      () => findItem(parts[0], 1, null, dialog), CFG.waitTimeout
+    ).catch(() => null);
+    if (!l1) throw new Error(`Destination L1 not found: "${parts[0]}"`);
+    if (parts.length === 1) { await scrollIntoView(l1); l1.click(); return; }
+
+    // Level 2
+    await expandItem(l1);
+    const l2 = await waitFor(
+      () => findItem(parts[1], 2, l1), CFG.waitTimeout
+    ).catch(() => null);
+    if (!l2) throw new Error(`Destination L2 not found: "${parts[1]}"`);
+    if (parts.length === 2) { await scrollIntoView(l2); l2.click(); return; }
+
+    // Level 3
+    await expandItem(l2);
+    const l3 = await waitFor(
+      () => findItem(parts[2], 3, l2), CFG.waitTimeout
+    ).catch(() => null);
+    if (!l3) throw new Error(`Destination L3 not found: "${parts[2]}"`);
+    await scrollIntoView(l3); l3.click();
+  }
+
+  /**
+   * Scan the dialog tree by expanding each level until the named item is found.
+   * Checks L1 first, then expands each L1 to check L2, then L2 to check L3.
+   */
+  async function navigateDialogByName(dialog, name) {
+    const n = normalize(name);
+
+    // Wait for at least one Level-1 item to be present
+    await waitFor(
+      () => dialog.querySelector('li[role="treeitem"][aria-level="1"]'),
+      CFG.waitTimeout
+    );
+
+    const l1Items = Array.from(dialog.querySelectorAll('li[role="treeitem"][aria-level="1"]'));
+
+    for (const l1 of l1Items) {
+      // Check Level 1
+      if (getItemName(l1) === n) {
+        await scrollIntoView(l1); l1.click(); return;
+      }
+
+      // Expand and check Level 2
+      await expandItem(l1);
+      const l1Container = getChildrenContainer(l1);
+      if (!l1Container) continue;
+
+      const l2Items = Array.from(l1Container.querySelectorAll('li[role="treeitem"][aria-level="2"]'));
+      for (const l2 of l2Items) {
+        if (getItemName(l2) === n) {
+          await scrollIntoView(l2); l2.click(); return;
+        }
+
+        // Expand and check Level 3
+        await expandItem(l2);
+        const l2Container = getChildrenContainer(l2);
+        if (!l2Container) continue;
+
+        for (const l3 of l2Container.querySelectorAll('li[role="treeitem"][aria-level="3"]')) {
+          if (getItemName(l3) === n) {
+            await scrollIntoView(l3); l3.click(); return;
+          }
+        }
+      }
+    }
+
+    throw new Error(`Destination "${name}" not found in Move/Merge dialog tree`);
   }
 
 
@@ -351,48 +439,19 @@
     log('  Removed', 'success');
   }
 
-  async function selectDestination(destination) {
-    await sleep(CFG.dialogDelay);
-    const searchInput = await waitFor(() => document.querySelector([
-      'p-dialog input[type="search"]', '.p-dialog input[type="search"]',
-      '[role="dialog"] input[type="search"]',
-      'p-dialog input[placeholder*="Search" i]', '.p-dialog input[placeholder*="Search" i]',
-      '[role="dialog"] input[placeholder*="Search" i]',
-      '[role="dialog"] input[type="text"]',
-    ].join(','))).catch(() => null);
-    if (searchInput) { setInputValue(searchInput, destination); await sleep(CFG.dialogDelay); }
-
-    const destEl = await waitFor(() => {
-      for (const d of document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container')) {
-        for (const el of d.querySelectorAll('.kanban-tree-node-name')) {
-          if (normalize(el.textContent) === normalize(destination)) return el;
-        }
-        for (const el of d.querySelectorAll('li[role="treeitem"]')) {
-          if (normalize(el.getAttribute('aria-label')) === normalize(destination)) return el;
-        }
-        for (const el of d.querySelectorAll('li, span, div')) {
-          if (normalize(el.textContent).trim() === normalize(destination) &&
-              el.offsetParent !== null && !el.querySelector('li, span, div')) return el;
-        }
-      }
-      return null;
-    });
-    destEl.click();
-    await sleep(CFG.shortDelay);
-    await clickDialogButton('save', 'move', 'merge', 'confirm', 'ok');
-  }
-
   async function performMove(li, destination) {
     await openMoreMenu(li);
     await clickMenuOption('Move');
-    await selectDestination(destination);
+    await selectDestinationInDialog(destination);
+    await clickDialogButton('save', 'move', 'confirm', 'ok');
     log(`  Moved → "${destination}"`, 'success');
   }
 
   async function performMerge(li, target) {
     await openMoreMenu(li);
     await clickMenuOption('Merge');
-    await selectDestination(target);
+    await selectDestinationInDialog(target);
+    await clickDialogButton('save', 'merge', 'confirm', 'ok');
     log(`  Merged → "${target}"`, 'success');
   }
 
