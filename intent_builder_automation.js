@@ -30,6 +30,7 @@
     actionDelay: 700,   // ms – after opening a menu / typing
     dialogDelay: 1200,  // ms – after a dialog opens or closes
     waitTimeout: 8000,  // ms – max time to wait for a DOM element
+    scrollDelay: 300,   // ms – after scrollIntoView, before acting
   };
 
 
@@ -79,6 +80,15 @@
     await sleep(CFG.shortDelay);
   }
 
+  /**
+   * Scrolls an element into the visible area and waits for the browser/
+   * Angular to render any newly-visible virtual-scroll items.
+   */
+  async function scrollIntoView(el) {
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    await sleep(CFG.scrollDelay);
+  }
+
   async function tryCloseDialog() {
     const sel = [
       'p-dialog .p-dialog-header-close',
@@ -106,50 +116,33 @@
       const next = text[i + 1];
 
       if (inQuotes) {
-        if (ch === '"' && next === '"') {
-          field += '"';
-          i++;
-        } else if (ch === '"') {
-          inQuotes = false;
-        } else {
-          field += ch; // newlines inside quotes stay as field content
-        }
+        if (ch === '"' && next === '"') { field += '"'; i++; }
+        else if (ch === '"')            { inQuotes = false; }
+        else                            { field += ch; }
       } else {
-        if (ch === '"') {
-          inQuotes = true;
-        } else if (ch === ',') {
-          fields.push(field.trim());
-          field = '';
-        } else if (ch === '\r' && next === '\n') {
-          fields.push(field.trim());
-          field = '';
+        if      (ch === '"')                    { inQuotes = true; }
+        else if (ch === ',')                    { fields.push(field.trim()); field = ''; }
+        else if (ch === '\r' && next === '\n') {
+          fields.push(field.trim()); field = '';
           if (fields.some(f => f !== '')) records.push(fields);
-          fields = [];
-          i++;
+          fields = []; i++;
         } else if (ch === '\n' || ch === '\r') {
-          fields.push(field.trim());
-          field = '';
+          fields.push(field.trim()); field = '';
           if (fields.some(f => f !== '')) records.push(fields);
           fields = [];
-        } else {
-          field += ch;
-        }
+        } else { field += ch; }
       }
     }
-
     if (field || fields.length > 0) {
       fields.push(field.trim());
       if (fields.some(f => f !== '')) records.push(fields);
     }
 
     if (records.length < 2) throw new Error('CSV has no data rows');
-
     const headers = records[0].map(h => h.replace(/^"|"$/g, '').trim());
     return records.slice(1).map(cols => {
       const row = {};
-      headers.forEach((h, i) => {
-        row[h] = (cols[i] || '').replace(/^"|"$/g, '').trim();
-      });
+      headers.forEach((h, i) => { row[h] = (cols[i] || '').replace(/^"|"$/g, '').trim(); });
       return row;
     });
   }
@@ -200,49 +193,61 @@
   }
 
   /**
-   * Expands a collapsed treeitem and waits until aria-expanded confirms
-   * the node is open before returning. PrimeNG lazily renders child nodes,
-   * so we must not proceed until the DOM has actually updated.
+   * Scrolls a treeitem into view, then expands it if collapsed.
+   * Waits for aria-expanded to confirm the open state before returning,
+   * so callers can immediately query for child nodes.
    */
-  async function ensureExpanded(li) {
-    if (li.getAttribute('aria-expanded') !== 'false') return; // already open or leaf
+  async function expandItem(li) {
+    // Bring the item into the visible area first.
+    // This matters when PrimeNG uses virtual scrolling — items outside
+    // the viewport are not rendered in the DOM until scrolled into view.
+    await scrollIntoView(li);
+
+    if (li.getAttribute('aria-expanded') !== 'false') return; // already open
 
     const toggler = li.querySelector('button.p-tree-toggler');
-    if (!toggler) return; // no toggler = leaf node, nothing to expand
+    if (!toggler) return; // leaf node — nothing to expand
 
     toggler.click();
 
-    // Wait until the aria-expanded attribute flips away from 'false'
+    // Wait until the attribute confirms expansion
     await waitFor(
       () => li.getAttribute('aria-expanded') !== 'false' ? li : null,
       CFG.waitTimeout
     ).catch(() => null);
 
-    // Small extra buffer for Angular to finish rendering the new child nodes
+    // Small buffer so Angular finishes rendering new child nodes
     await sleep(CFG.shortDelay);
   }
 
   /**
    * Locates the target treeitem described by a CSV row.
-   * After each expansion step it uses waitFor() to poll until the expected
-   * child items are actually present in the DOM — this handles PrimeNG's
-   * lazy/virtual rendering where children only appear after the parent opens.
+   *
+   * At each level:
+   *   1. Scroll the parent into view (triggers virtual-scroll rendering).
+   *   2. Expand the parent and wait for aria-expanded to flip.
+   *   3. Use waitFor() to poll until the expected child appears in the DOM.
+   *
+   * This handles both PrimeNG lazy rendering and post-action tree re-renders
+   * (e.g. after a Rename Angular may briefly collapse or re-paint the tree).
    */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
-    // ── Level 1: Category (always visible) ──
-    const catItem = findItem(category, 1);
+    // ── Level 1: Category ──
+    // Re-query every call — a previous rename may have caused a re-render
+    // that invalidated stale element references.
+    const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
     if (!catItem) {
       log(`Category not found: "${category}"`, 'error');
       return null;
     }
     if (!topic) return catItem;
 
-    // ── Level 2: expand category, wait for topic to appear ──
-    await ensureExpanded(catItem);
+    // ── Level 2: Topic ──
+    await expandItem(catItem);
     const topicItem = await waitFor(
       () => findItem(topic, 2, catItem),
       CFG.waitTimeout
@@ -253,8 +258,8 @@
     }
     if (!intent) return topicItem;
 
-    // ── Level 3: expand topic, wait for intent to appear ──
-    await ensureExpanded(topicItem);
+    // ── Level 3: Intent ──
+    await expandItem(topicItem);
     const intentItem = await waitFor(
       () => findItem(intent, 3, topicItem),
       CFG.waitTimeout
@@ -264,6 +269,8 @@
       return null;
     }
 
+    // Scroll the target into view before the caller interacts with it
+    await scrollIntoView(intentItem);
     return intentItem;
   }
 
@@ -283,14 +290,10 @@
     const target = normalize(label);
     const el = await waitFor(() => {
       const containers = document.querySelectorAll([
-        'p-overlaypanel',
-        '.p-overlaypanel',
-        '.p-menu',
-        '.p-contextmenu',
+        'p-overlaypanel', '.p-overlaypanel',
+        '.p-menu', '.p-contextmenu',
         '[role="menu"]',
-        '.cxone-menu',
-        '.dropdown-menu',
-        '.context-menu',
+        '.cxone-menu', '.dropdown-menu', '.context-menu',
       ].join(','));
 
       for (const c of containers) {
@@ -305,7 +308,6 @@
       }
       return null;
     });
-
     el.click();
     await sleep(CFG.actionDelay);
   }
@@ -427,20 +429,12 @@
     log('=== Intent Builder Automation Started ===');
 
     let csvText;
-    try {
-      csvText = await pickCSVFile();
-    } catch (e) {
-      log('File selection cancelled or failed: ' + e.message, 'error');
-      return;
-    }
+    try { csvText = await pickCSVFile(); }
+    catch (e) { log('File selection cancelled or failed: ' + e.message, 'error'); return; }
 
     let rows;
-    try {
-      rows = parseCSV(csvText);
-    } catch (e) {
-      log('CSV parse error: ' + e.message, 'error');
-      return;
-    }
+    try { rows = parseCSV(csvText); }
+    catch (e) { log('CSV parse error: ' + e.message, 'error'); return; }
     log(`CSV loaded — ${rows.length} data rows`);
 
     let success = 0, skipped = 0, errors = 0;
@@ -465,26 +459,21 @@
         if (!target) { errors++; continue; }
 
         switch (action.toLowerCase()) {
-
           case 'rename':
             if (!change) throw new Error('"Required Change" is empty for Rename');
             await performRename(target, change);
             break;
-
           case 'remove':
             await performRemove(target);
             break;
-
           case 'move':
             if (!change) throw new Error('"Required Change" is empty for Move');
             await performMove(target, change);
             break;
-
           case 'merge':
             if (!change) throw new Error('"Required Change" is empty for Merge');
             await performMerge(target, change);
             break;
-
           default:
             log(`Row ${rowNum}: Unknown action "${action}" — skipping`, 'warn');
             skipped++;
