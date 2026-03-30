@@ -107,15 +107,12 @@
 
       if (inQuotes) {
         if (ch === '"' && next === '"') {
-          // Escaped double-quote inside a quoted field
           field += '"';
           i++;
         } else if (ch === '"') {
-          // Closing quote
           inQuotes = false;
         } else {
-          // Any character (including \n / \r) is part of the field value
-          field += ch;
+          field += ch; // newlines inside quotes stay as field content
         }
       } else {
         if (ch === '"') {
@@ -124,14 +121,12 @@
           fields.push(field.trim());
           field = '';
         } else if (ch === '\r' && next === '\n') {
-          // Windows line ending — treat as one newline
           fields.push(field.trim());
           field = '';
           if (fields.some(f => f !== '')) records.push(fields);
           fields = [];
-          i++; // skip the \n
+          i++;
         } else if (ch === '\n' || ch === '\r') {
-          // Unix / old-Mac line ending
           fields.push(field.trim());
           field = '';
           if (fields.some(f => f !== '')) records.push(fields);
@@ -142,7 +137,6 @@
       }
     }
 
-    // Flush the last field / record
     if (field || fields.length > 0) {
       fields.push(field.trim());
       if (fields.some(f => f !== '')) records.push(fields);
@@ -205,18 +199,41 @@
     return null;
   }
 
+  /**
+   * Expands a collapsed treeitem and waits until aria-expanded confirms
+   * the node is open before returning. PrimeNG lazily renders child nodes,
+   * so we must not proceed until the DOM has actually updated.
+   */
   async function ensureExpanded(li) {
-    if (li.getAttribute('aria-expanded') === 'false') {
-      const toggler = li.querySelector('button.p-tree-toggler');
-      if (toggler) { toggler.click(); await sleep(CFG.actionDelay); }
-    }
+    if (li.getAttribute('aria-expanded') !== 'false') return; // already open or leaf
+
+    const toggler = li.querySelector('button.p-tree-toggler');
+    if (!toggler) return; // no toggler = leaf node, nothing to expand
+
+    toggler.click();
+
+    // Wait until the aria-expanded attribute flips away from 'false'
+    await waitFor(
+      () => li.getAttribute('aria-expanded') !== 'false' ? li : null,
+      CFG.waitTimeout
+    ).catch(() => null);
+
+    // Small extra buffer for Angular to finish rendering the new child nodes
+    await sleep(CFG.shortDelay);
   }
 
+  /**
+   * Locates the target treeitem described by a CSV row.
+   * After each expansion step it uses waitFor() to poll until the expected
+   * child items are actually present in the DOM — this handles PrimeNG's
+   * lazy/virtual rendering where children only appear after the parent opens.
+   */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
+    // ── Level 1: Category (always visible) ──
     const catItem = findItem(category, 1);
     if (!catItem) {
       log(`Category not found: "${category}"`, 'error');
@@ -224,16 +241,24 @@
     }
     if (!topic) return catItem;
 
+    // ── Level 2: expand category, wait for topic to appear ──
     await ensureExpanded(catItem);
-    const topicItem = findItem(topic, 2, catItem);
+    const topicItem = await waitFor(
+      () => findItem(topic, 2, catItem),
+      CFG.waitTimeout
+    ).catch(() => null);
     if (!topicItem) {
       log(`Topic not found: "${topic}" under "${category}"`, 'error');
       return null;
     }
     if (!intent) return topicItem;
 
+    // ── Level 3: expand topic, wait for intent to appear ──
     await ensureExpanded(topicItem);
-    const intentItem = findItem(intent, 3, topicItem);
+    const intentItem = await waitFor(
+      () => findItem(intent, 3, topicItem),
+      CFG.waitTimeout
+    ).catch(() => null);
     if (!intentItem) {
       log(`Intent not found: "${intent}" under "${topic}" > "${category}"`, 'error');
       return null;
