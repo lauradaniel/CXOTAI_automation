@@ -52,9 +52,6 @@
   // ─────────────────────────────────────────────
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  /**
-   * Polls until selectorFn() returns a truthy value or timeout is reached.
-   */
   function waitFor(selectorFn, timeout = CFG.waitTimeout) {
     return new Promise((resolve, reject) => {
       const deadline = Date.now() + timeout;
@@ -69,9 +66,6 @@
     });
   }
 
-  /**
-   * Sets an input's value in a way Angular's change detection picks up.
-   */
   function setInputValue(input, value) {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     setter.call(input, value);
@@ -79,19 +73,12 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  /**
-   * Fires mouseenter + mouseover on an element (reveals hover-only buttons).
-   */
   async function hoverOver(el) {
     el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true }));
     await sleep(CFG.shortDelay);
   }
 
-  /**
-   * Closes any open dialog by clicking its close / cancel button.
-   * Used for error recovery.
-   */
   async function tryCloseDialog() {
     const sel = [
       'p-dialog .p-dialog-header-close',
@@ -106,37 +93,69 @@
 
 
   // ─────────────────────────────────────────────
-  // CSV PARSING
+  // CSV PARSING  (RFC 4180 — handles multi-line quoted fields)
   // ─────────────────────────────────────────────
   function parseCSV(text) {
-    const lines = text.split(/\r?\n/).filter(l => l.trim());
-    if (lines.length < 2) throw new Error('CSV has no data rows');
+    const records = [];
+    let field    = '';
+    let fields   = [];
+    let inQuotes = false;
 
-    // Parse a single line respecting quoted fields
-    function parseLine(line) {
-      const fields = [];
-      let cur = '', inQ = false;
-      for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (ch === '"') {
-          // Handle escaped quotes ("")
-          if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
-          else inQ = !inQ;
-        } else if (ch === ',' && !inQ) {
-          fields.push(cur.trim()); cur = '';
+    for (let i = 0; i < text.length; i++) {
+      const ch   = text[i];
+      const next = text[i + 1];
+
+      if (inQuotes) {
+        if (ch === '"' && next === '"') {
+          // Escaped double-quote inside a quoted field
+          field += '"';
+          i++;
+        } else if (ch === '"') {
+          // Closing quote
+          inQuotes = false;
         } else {
-          cur += ch;
+          // Any character (including \n / \r) is part of the field value
+          field += ch;
+        }
+      } else {
+        if (ch === '"') {
+          inQuotes = true;
+        } else if (ch === ',') {
+          fields.push(field.trim());
+          field = '';
+        } else if (ch === '\r' && next === '\n') {
+          // Windows line ending — treat as one newline
+          fields.push(field.trim());
+          field = '';
+          if (fields.some(f => f !== '')) records.push(fields);
+          fields = [];
+          i++; // skip the \n
+        } else if (ch === '\n' || ch === '\r') {
+          // Unix / old-Mac line ending
+          fields.push(field.trim());
+          field = '';
+          if (fields.some(f => f !== '')) records.push(fields);
+          fields = [];
+        } else {
+          field += ch;
         }
       }
-      fields.push(cur.trim());
-      return fields;
     }
 
-    const headers = parseLine(lines[0]);
-    return lines.slice(1).map(line => {
-      const vals = parseLine(line);
+    // Flush the last field / record
+    if (field || fields.length > 0) {
+      fields.push(field.trim());
+      if (fields.some(f => f !== '')) records.push(fields);
+    }
+
+    if (records.length < 2) throw new Error('CSV has no data rows');
+
+    const headers = records[0].map(h => h.replace(/^"|"$/g, '').trim());
+    return records.slice(1).map(cols => {
       const row = {};
-      headers.forEach((h, i) => row[h] = (vals[i] || '').replace(/^"|"$/g, '').trim());
+      headers.forEach((h, i) => {
+        row[h] = (cols[i] || '').replace(/^"|"$/g, '').trim();
+      });
       return row;
     });
   }
@@ -171,20 +190,12 @@
 
   const normalize = s => (s || '').trim().toLowerCase();
 
-  /**
-   * Returns the display name of a treeitem element.
-   * Prefers .kanban-tree-node-name text; falls back to aria-label.
-   */
   function getItemName(li) {
     const nameEl = li.querySelector('.kanban-tree-node-name');
     if (nameEl) return normalize(nameEl.textContent);
     return normalize(li.getAttribute('aria-label'));
   }
 
-  /**
-   * Finds a treeitem at the given aria-level whose display name matches.
-   * Optionally restricts search to within a parent element.
-   */
   function findItem(name, level, parent = document) {
     const n = normalize(name);
     const items = parent.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`);
@@ -194,9 +205,6 @@
     return null;
   }
 
-  /**
-   * Expands a treeitem if it is currently collapsed.
-   */
   async function ensureExpanded(li) {
     if (li.getAttribute('aria-expanded') === 'false') {
       const toggler = li.querySelector('button.p-tree-toggler');
@@ -204,35 +212,26 @@
     }
   }
 
-  /**
-   * Locates the target treeitem described by a CSV row.
-   * Handles all three levels (Category → Topic → Intent).
-   */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
-    // ── Level 1: Category ──
     const catItem = findItem(category, 1);
     if (!catItem) {
       log(`Category not found: "${category}"`, 'error');
       return null;
     }
+    if (!topic) return catItem;
 
-    if (!topic) return catItem; // action targets the category itself
-
-    // ── Level 2: Topic ──
     await ensureExpanded(catItem);
     const topicItem = findItem(topic, 2, catItem);
     if (!topicItem) {
       log(`Topic not found: "${topic}" under "${category}"`, 'error');
       return null;
     }
+    if (!intent) return topicItem;
 
-    if (!intent) return topicItem; // action targets the topic itself
-
-    // ── Level 3: Intent ──
     await ensureExpanded(topicItem);
     const intentItem = findItem(intent, 3, topicItem);
     if (!intentItem) {
@@ -248,9 +247,6 @@
   // MENU HELPERS
   // ─────────────────────────────────────────────
 
-  /**
-   * Hovers over a treeitem and clicks its three-dot (kanban-more-button).
-   */
   async function openMoreMenu(li) {
     await hoverOver(li);
     const btn = await waitFor(() => li.querySelector('button.kanban-more-button'));
@@ -258,14 +254,9 @@
     await sleep(CFG.actionDelay);
   }
 
-  /**
-   * Finds and clicks a menu option whose visible text contains `label`.
-   * Searches inside any currently-visible overlay / context-menu.
-   */
   async function clickMenuOption(label) {
     const target = normalize(label);
     const el = await waitFor(() => {
-      // Candidate containers for the floating menu
       const containers = document.querySelectorAll([
         'p-overlaypanel',
         '.p-overlaypanel',
@@ -278,14 +269,12 @@
       ].join(','));
 
       for (const c of containers) {
-        if (!c.offsetParent && c.style.display === 'none') continue; // hidden
+        if (!c.offsetParent && c.style.display === 'none') continue;
         const items = c.querySelectorAll('li, [role="menuitem"], button, a');
         for (const item of items) {
           if (normalize(item.textContent).includes(target)) return item;
         }
       }
-
-      // Fallback: any visible element exactly matching the label
       for (const el of document.querySelectorAll('li, [role="menuitem"], button.p-menuitem-link')) {
         if (normalize(el.textContent).trim() === target && el.offsetParent !== null) return el;
       }
@@ -296,9 +285,6 @@
     await sleep(CFG.actionDelay);
   }
 
-  /**
-   * Finds a button inside an open dialog whose text matches one of the provided labels.
-   */
   async function clickDialogButton(...labels) {
     const targets = labels.map(normalize);
     const btn = await waitFor(() => {
@@ -320,12 +306,10 @@
   // ACTION HANDLERS
   // ─────────────────────────────────────────────
 
-  // ── RENAME ──────────────────────────────────
   async function performRename(li, newName) {
     await openMoreMenu(li);
     await clickMenuOption('Rename');
 
-    // Locate text input in the rename dialog
     const input = await waitFor(() =>
       document.querySelector([
         'p-dialog input[type="text"]',
@@ -344,22 +328,16 @@
     log(`  Renamed → "${newName}"`, 'success');
   }
 
-
-  // ── REMOVE ──────────────────────────────────
   async function performRemove(li) {
     await openMoreMenu(li);
     await clickMenuOption('Remove');
-
     await clickDialogButton('remove', 'delete', 'confirm', 'yes');
     log('  Removed', 'success');
   }
 
-
-  // ── SHARED: select destination in Move/Merge dialog ──
   async function selectDestination(destination) {
-    await sleep(CFG.dialogDelay); // wait for dialog to fully render
+    await sleep(CFG.dialogDelay);
 
-    // Try to use the search box inside the dialog
     const searchInput = await waitFor(() =>
       document.querySelector([
         'p-dialog input[type="search"]',
@@ -368,7 +346,6 @@
         'p-dialog input[placeholder*="Search" i]',
         '.p-dialog input[placeholder*="Search" i]',
         '[role="dialog"] input[placeholder*="Search" i]',
-        'p-dialog input[placeholder*="search" i]',
         '[role="dialog"] input[type="text"]',
       ].join(','))
     ).catch(() => null);
@@ -378,24 +355,20 @@
       await sleep(CFG.dialogDelay);
     }
 
-    // Find and click the destination item inside the dialog tree
     const destEl = await waitFor(() => {
       const dialogs = document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container');
       for (const d of dialogs) {
-        // Prefer .kanban-tree-node-name elements
         for (const el of d.querySelectorAll('.kanban-tree-node-name')) {
           if (normalize(el.textContent) === normalize(destination)) return el;
         }
-        // Fall back to treeitem aria-label
         for (const el of d.querySelectorAll('li[role="treeitem"]')) {
           if (normalize(el.getAttribute('aria-label')) === normalize(destination)) return el;
         }
-        // Generic text match on any visible element
         for (const el of d.querySelectorAll('li, span, div')) {
           if (
             normalize(el.textContent).trim() === normalize(destination) &&
             el.offsetParent !== null &&
-            !el.querySelector('li, span, div') // leaf node only
+            !el.querySelector('li, span, div')
           ) return el;
         }
       }
@@ -404,25 +377,18 @@
 
     destEl.click();
     await sleep(CFG.shortDelay);
-
     await clickDialogButton('save', 'move', 'merge', 'confirm', 'ok');
   }
 
-
-  // ── MOVE ────────────────────────────────────
   async function performMove(li, destination) {
     await openMoreMenu(li);
-    // The menu item may say "Move", "Move/Merge", or similar
     await clickMenuOption('Move');
     await selectDestination(destination);
     log(`  Moved → "${destination}"`, 'success');
   }
 
-
-  // ── MERGE ───────────────────────────────────
   async function performMerge(li, target) {
     await openMoreMenu(li);
-    // If the menu has a combined "Move/Merge" option, "Merge" text will match it
     await clickMenuOption('Merge');
     await selectDestination(target);
     log(`  Merged → "${target}"`, 'success');
@@ -435,7 +401,6 @@
   async function run() {
     log('=== Intent Builder Automation Started ===');
 
-    // 1. Pick the CSV file
     let csvText;
     try {
       csvText = await pickCSVFile();
@@ -444,7 +409,6 @@
       return;
     }
 
-    // 2. Parse CSV
     let rows;
     try {
       rows = parseCSV(csvText);
@@ -454,12 +418,11 @@
     }
     log(`CSV loaded — ${rows.length} data rows`);
 
-    // 3. Process rows
     let success = 0, skipped = 0, errors = 0;
 
     for (let i = 0; i < rows.length; i++) {
       const row    = rows[i];
-      const rowNum = i + 2; // 1-based + header
+      const rowNum = i + 2;
       const action = (row['Action'] || '').trim();
       const change = (row['Required Change'] || '').trim();
       const label  = row['Intent'] || row['Topic'] || row['Category'] || '(unknown)';
@@ -511,7 +474,7 @@
         await tryCloseDialog();
       }
 
-      await sleep(CFG.shortDelay); // brief pause between rows
+      await sleep(CFG.shortDelay);
     }
 
     log(
