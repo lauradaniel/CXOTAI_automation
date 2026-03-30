@@ -26,11 +26,11 @@
   // CONFIGURATION
   // ─────────────────────────────────────────────
   const CFG = {
-    shortDelay:  400,   // ms – between micro-steps
-    actionDelay: 700,   // ms – after opening a menu / typing
-    dialogDelay: 1200,  // ms – after a dialog opens or closes
-    waitTimeout: 8000,  // ms – max time to wait for a DOM element
-    scrollDelay: 300,   // ms – after scrollIntoView, before acting
+    shortDelay:  400,
+    actionDelay: 700,
+    dialogDelay: 1200,
+    waitTimeout: 8000,
+    scrollDelay: 300,
   };
 
 
@@ -61,7 +61,7 @@
         if (el) { clearInterval(iv); resolve(el); }
         else if (Date.now() > deadline) {
           clearInterval(iv);
-          reject(new Error('waitFor timeout: element not found'));
+          reject(new Error('waitFor timeout'));
         }
       }, 100);
     });
@@ -80,24 +80,18 @@
     await sleep(CFG.shortDelay);
   }
 
-  /**
-   * Scrolls an element into the visible area and waits for the browser/
-   * Angular to render any newly-visible virtual-scroll items.
-   */
   async function scrollIntoView(el) {
     el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     await sleep(CFG.scrollDelay);
   }
 
   async function tryCloseDialog() {
-    const sel = [
+    const btn = document.querySelector([
       'p-dialog .p-dialog-header-close',
       '.p-dialog .p-dialog-header-close',
       '[role="dialog"] button[aria-label="Close"]',
       '[role="dialog"] button[aria-label="close"]',
-      '[role="dialog"] .p-dialog-header-close',
-    ].join(', ');
-    const btn = document.querySelector(sel);
+    ].join(','));
     if (btn) { btn.click(); await sleep(CFG.dialogDelay); }
   }
 
@@ -107,21 +101,16 @@
   // ─────────────────────────────────────────────
   function parseCSV(text) {
     const records = [];
-    let field    = '';
-    let fields   = [];
-    let inQuotes = false;
-
+    let field = '', fields = [], inQuotes = false;
     for (let i = 0; i < text.length; i++) {
-      const ch   = text[i];
-      const next = text[i + 1];
-
+      const ch = text[i], next = text[i + 1];
       if (inQuotes) {
         if (ch === '"' && next === '"') { field += '"'; i++; }
         else if (ch === '"')            { inQuotes = false; }
         else                            { field += ch; }
       } else {
-        if      (ch === '"')                    { inQuotes = true; }
-        else if (ch === ',')                    { fields.push(field.trim()); field = ''; }
+        if      (ch === '"')                   { inQuotes = true; }
+        else if (ch === ',')                   { fields.push(field.trim()); field = ''; }
         else if (ch === '\r' && next === '\n') {
           fields.push(field.trim()); field = '';
           if (fields.some(f => f !== '')) records.push(fields);
@@ -137,7 +126,6 @@
       fields.push(field.trim());
       if (fields.some(f => f !== '')) records.push(fields);
     }
-
     if (records.length < 2) throw new Error('CSV has no data rows');
     const headers = records[0].map(h => h.replace(/^"|"$/g, '').trim());
     return records.slice(1).map(cols => {
@@ -154,9 +142,7 @@
   function pickCSVFile() {
     return new Promise((resolve, reject) => {
       const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.csv,text/csv';
-      input.style.display = 'none';
+      input.type = 'file'; input.accept = '.csv,text/csv'; input.style.display = 'none';
       document.body.appendChild(input);
       input.onchange = e => {
         const file = e.target.files[0];
@@ -178,15 +164,57 @@
   const normalize = s => (s || '').trim().toLowerCase();
 
   function getItemName(li) {
-    const nameEl = li.querySelector('.kanban-tree-node-name');
-    if (nameEl) return normalize(nameEl.textContent);
-    return normalize(li.getAttribute('aria-label'));
+    const el = li.querySelector('.kanban-tree-node-name');
+    return el ? normalize(el.textContent) : normalize(li.getAttribute('aria-label'));
   }
 
-  function findItem(name, level, parent = document) {
+  /**
+   * Returns the <ul> that holds the direct children of a treeitem.
+   *
+   * PrimeNG renders its tree like this:
+   *
+   *   <p-treenode>               ← Angular component wrapper
+   *     <li role="treeitem">     ← the item we hold a reference to
+   *       <div class="p-treenode-content">...
+   *     </li>
+   *     <ul class="p-treenode-children">  ← SIBLING of li, NOT inside it
+   *       <p-treenode>...
+   *     </ul>
+   *   </p-treenode>
+   *
+   * So we first try inside the li (standard HTML pattern), then fall back
+   * to looking for a sibling ul inside the parent wrapper element.
+   */
+  function getChildrenContainer(li) {
+    // Standard HTML: ul nested inside the li
+    const inner = li.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
+    if (inner) return inner;
+
+    // PrimeNG pattern: ul is a direct sibling inside the p-treenode wrapper
+    const wrapper = li.parentElement;
+    if (wrapper) {
+      const sibling = wrapper.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
+      if (sibling) return sibling;
+    }
+    return null;
+  }
+
+  /**
+   * Finds a treeitem by name at the given level.
+   * When parentLi is provided, searches only within that node's children
+   * container (handles both nested and sibling-ul PrimeNG structures).
+   * When parentLi is null, searches the whole document (used for Level 1).
+   */
+  function findItem(name, level, parentLi = null) {
     const n = normalize(name);
-    const items = parent.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`);
-    for (const li of items) {
+    let scope;
+    if (parentLi) {
+      scope = getChildrenContainer(parentLi);
+      if (!scope) return null; // children not yet in DOM
+    } else {
+      scope = document;
+    }
+    for (const li of scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`)) {
       if (getItemName(li) === n) return li;
     }
     return null;
@@ -194,82 +222,58 @@
 
   /**
    * Scrolls a treeitem into view, then expands it if collapsed.
-   * Waits for aria-expanded to confirm the open state before returning,
-   * so callers can immediately query for child nodes.
+   * Waits for BOTH aria-expanded to flip AND the children <ul> to appear
+   * in the DOM (PrimeNG uses *ngIf, so the ul is only added after expand).
    */
   async function expandItem(li) {
-    // Bring the item into the visible area first.
-    // This matters when PrimeNG uses virtual scrolling — items outside
-    // the viewport are not rendered in the DOM until scrolled into view.
     await scrollIntoView(li);
 
     if (li.getAttribute('aria-expanded') !== 'false') return; // already open
 
     const toggler = li.querySelector('button.p-tree-toggler');
-    if (!toggler) return; // leaf node — nothing to expand
+    if (!toggler) return; // leaf node
 
     toggler.click();
 
-    // Wait until the attribute confirms expansion
-    await waitFor(
-      () => li.getAttribute('aria-expanded') !== 'false' ? li : null,
-      CFG.waitTimeout
-    ).catch(() => null);
+    // Wait until the node is open AND its children container exists in the DOM
+    await waitFor(() => {
+      const open       = li.getAttribute('aria-expanded') !== 'false';
+      const hasChildren = !!getChildrenContainer(li);
+      return (open && hasChildren) ? li : null;
+    }, CFG.waitTimeout).catch(() => null);
 
-    // Small buffer so Angular finishes rendering new child nodes
     await sleep(CFG.shortDelay);
   }
 
   /**
-   * Locates the target treeitem described by a CSV row.
-   *
-   * At each level:
-   *   1. Scroll the parent into view (triggers virtual-scroll rendering).
-   *   2. Expand the parent and wait for aria-expanded to flip.
-   *   3. Use waitFor() to poll until the expected child appears in the DOM.
-   *
-   * This handles both PrimeNG lazy rendering and post-action tree re-renders
-   * (e.g. after a Rename Angular may briefly collapse or re-paint the tree).
+   * Resolves the correct treeitem for a CSV row by navigating
+   * Category → Topic → Intent, expanding each level as needed.
    */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
-    // ── Level 1: Category ──
-    // Re-query every call — a previous rename may have caused a re-render
-    // that invalidated stale element references.
+    // ── Level 1: Category (always visible, no parent scope needed) ──
     const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
-    if (!catItem) {
-      log(`Category not found: "${category}"`, 'error');
-      return null;
-    }
+    if (!catItem) { log(`Category not found: "${category}"`, 'error'); return null; }
     if (!topic) return catItem;
 
-    // ── Level 2: Topic ──
+    // ── Level 2: expand category, wait for topic to appear in sibling ul ──
     await expandItem(catItem);
     const topicItem = await waitFor(
-      () => findItem(topic, 2, catItem),
-      CFG.waitTimeout
+      () => findItem(topic, 2, catItem), CFG.waitTimeout
     ).catch(() => null);
-    if (!topicItem) {
-      log(`Topic not found: "${topic}" under "${category}"`, 'error');
-      return null;
-    }
+    if (!topicItem) { log(`Topic not found: "${topic}" under "${category}"`, 'error'); return null; }
     if (!intent) return topicItem;
 
-    // ── Level 3: Intent ──
+    // ── Level 3: expand topic, wait for intent to appear in sibling ul ──
     await expandItem(topicItem);
     const intentItem = await waitFor(
-      () => findItem(intent, 3, topicItem),
-      CFG.waitTimeout
+      () => findItem(intent, 3, topicItem), CFG.waitTimeout
     ).catch(() => null);
-    if (!intentItem) {
-      log(`Intent not found: "${intent}" under "${topic}" > "${category}"`, 'error');
-      return null;
-    }
+    if (!intentItem) { log(`Intent not found: "${intent}" under "${topic}" > "${category}"`, 'error'); return null; }
 
-    // Scroll the target into view before the caller interacts with it
     await scrollIntoView(intentItem);
     return intentItem;
   }
@@ -290,16 +294,12 @@
     const target = normalize(label);
     const el = await waitFor(() => {
       const containers = document.querySelectorAll([
-        'p-overlaypanel', '.p-overlaypanel',
-        '.p-menu', '.p-contextmenu',
-        '[role="menu"]',
-        '.cxone-menu', '.dropdown-menu', '.context-menu',
+        'p-overlaypanel', '.p-overlaypanel', '.p-menu', '.p-contextmenu',
+        '[role="menu"]', '.cxone-menu', '.dropdown-menu', '.context-menu',
       ].join(','));
-
       for (const c of containers) {
         if (!c.offsetParent && c.style.display === 'none') continue;
-        const items = c.querySelectorAll('li, [role="menuitem"], button, a');
-        for (const item of items) {
+        for (const item of c.querySelectorAll('li, [role="menuitem"], button, a')) {
           if (normalize(item.textContent).includes(target)) return item;
         }
       }
@@ -315,11 +315,9 @@
   async function clickDialogButton(...labels) {
     const targets = labels.map(normalize);
     const btn = await waitFor(() => {
-      const dialogs = document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container');
-      for (const d of dialogs) {
+      for (const d of document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container')) {
         for (const b of d.querySelectorAll('button')) {
-          const t = normalize(b.textContent).trim();
-          if (targets.includes(t) && !b.disabled) return b;
+          if (targets.includes(normalize(b.textContent).trim()) && !b.disabled) return b;
         }
       }
       return null;
@@ -336,21 +334,13 @@
   async function performRename(li, newName) {
     await openMoreMenu(li);
     await clickMenuOption('Rename');
-
-    const input = await waitFor(() =>
-      document.querySelector([
-        'p-dialog input[type="text"]',
-        '.p-dialog input[type="text"]',
-        '[role="dialog"] input[type="text"]',
-        'mat-dialog-container input[type="text"]',
-      ].join(','))
-    );
-
-    input.focus();
-    input.select();
+    const input = await waitFor(() => document.querySelector([
+      'p-dialog input[type="text"]', '.p-dialog input[type="text"]',
+      '[role="dialog"] input[type="text"]', 'mat-dialog-container input[type="text"]',
+    ].join(',')));
+    input.focus(); input.select();
     setInputValue(input, newName);
     await sleep(CFG.shortDelay);
-
     await clickDialogButton('rename', 'save', 'confirm', 'ok');
     log(`  Renamed → "${newName}"`, 'success');
   }
@@ -364,27 +354,17 @@
 
   async function selectDestination(destination) {
     await sleep(CFG.dialogDelay);
-
-    const searchInput = await waitFor(() =>
-      document.querySelector([
-        'p-dialog input[type="search"]',
-        '.p-dialog input[type="search"]',
-        '[role="dialog"] input[type="search"]',
-        'p-dialog input[placeholder*="Search" i]',
-        '.p-dialog input[placeholder*="Search" i]',
-        '[role="dialog"] input[placeholder*="Search" i]',
-        '[role="dialog"] input[type="text"]',
-      ].join(','))
-    ).catch(() => null);
-
-    if (searchInput) {
-      setInputValue(searchInput, destination);
-      await sleep(CFG.dialogDelay);
-    }
+    const searchInput = await waitFor(() => document.querySelector([
+      'p-dialog input[type="search"]', '.p-dialog input[type="search"]',
+      '[role="dialog"] input[type="search"]',
+      'p-dialog input[placeholder*="Search" i]', '.p-dialog input[placeholder*="Search" i]',
+      '[role="dialog"] input[placeholder*="Search" i]',
+      '[role="dialog"] input[type="text"]',
+    ].join(','))).catch(() => null);
+    if (searchInput) { setInputValue(searchInput, destination); await sleep(CFG.dialogDelay); }
 
     const destEl = await waitFor(() => {
-      const dialogs = document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container');
-      for (const d of dialogs) {
+      for (const d of document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container')) {
         for (const el of d.querySelectorAll('.kanban-tree-node-name')) {
           if (normalize(el.textContent) === normalize(destination)) return el;
         }
@@ -392,16 +372,12 @@
           if (normalize(el.getAttribute('aria-label')) === normalize(destination)) return el;
         }
         for (const el of d.querySelectorAll('li, span, div')) {
-          if (
-            normalize(el.textContent).trim() === normalize(destination) &&
-            el.offsetParent !== null &&
-            !el.querySelector('li, span, div')
-          ) return el;
+          if (normalize(el.textContent).trim() === normalize(destination) &&
+              el.offsetParent !== null && !el.querySelector('li, span, div')) return el;
         }
       }
       return null;
     });
-
     destEl.click();
     await sleep(CFG.shortDelay);
     await clickDialogButton('save', 'move', 'merge', 'confirm', 'ok');
@@ -430,7 +406,7 @@
 
     let csvText;
     try { csvText = await pickCSVFile(); }
-    catch (e) { log('File selection cancelled or failed: ' + e.message, 'error'); return; }
+    catch (e) { log('File selection failed: ' + e.message, 'error'); return; }
 
     let rows;
     try { rows = parseCSV(csvText); }
@@ -448,8 +424,7 @@
 
       if (!action) {
         log(`Row ${rowNum}: No action — skipping "${label}"`, 'warn');
-        skipped++;
-        continue;
+        skipped++; continue;
       }
 
       log(`Row ${rowNum}: [${action}] "${label}"`);
@@ -460,26 +435,20 @@
 
         switch (action.toLowerCase()) {
           case 'rename':
-            if (!change) throw new Error('"Required Change" is empty for Rename');
-            await performRename(target, change);
-            break;
+            if (!change) throw new Error('"Required Change" is empty');
+            await performRename(target, change); break;
           case 'remove':
-            await performRemove(target);
-            break;
+            await performRemove(target); break;
           case 'move':
-            if (!change) throw new Error('"Required Change" is empty for Move');
-            await performMove(target, change);
-            break;
+            if (!change) throw new Error('"Required Change" is empty');
+            await performMove(target, change); break;
           case 'merge':
-            if (!change) throw new Error('"Required Change" is empty for Merge');
-            await performMerge(target, change);
-            break;
+            if (!change) throw new Error('"Required Change" is empty');
+            await performMerge(target, change); break;
           default:
             log(`Row ${rowNum}: Unknown action "${action}" — skipping`, 'warn');
-            skipped++;
-            continue;
+            skipped++; continue;
         }
-
         success++;
 
       } catch (e) {
