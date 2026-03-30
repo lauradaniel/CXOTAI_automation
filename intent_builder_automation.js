@@ -173,24 +173,20 @@
    *
    * PrimeNG renders its tree like this:
    *
-   *   <p-treenode>               ← Angular component wrapper
-   *     <li role="treeitem">     ← the item we hold a reference to
-   *       <div class="p-treenode-content">...
+   *   <p-treenode>                         ← Angular wrapper
+   *     <li role="treeitem">               ← the item we hold a ref to
+   *       <div class="p-treenode-content">
    *     </li>
-   *     <ul class="p-treenode-children">  ← SIBLING of li, NOT inside it
+   *     <ul class="p-treenode-children">   ← SIBLING of li, NOT inside it
    *       <p-treenode>...
    *     </ul>
    *   </p-treenode>
    *
-   * So we first try inside the li (standard HTML pattern), then fall back
-   * to looking for a sibling ul inside the parent wrapper element.
+   * We check inside the li first (standard HTML), then the sibling pattern.
    */
   function getChildrenContainer(li) {
-    // Standard HTML: ul nested inside the li
     const inner = li.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
     if (inner) return inner;
-
-    // PrimeNG pattern: ul is a direct sibling inside the p-treenode wrapper
     const wrapper = li.parentElement;
     if (wrapper) {
       const sibling = wrapper.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
@@ -201,16 +197,14 @@
 
   /**
    * Finds a treeitem by name at the given level.
-   * When parentLi is provided, searches only within that node's children
-   * container (handles both nested and sibling-ul PrimeNG structures).
-   * When parentLi is null, searches the whole document (used for Level 1).
+   * Scopes the search to the children container of parentLi when provided.
    */
   function findItem(name, level, parentLi = null) {
     const n = normalize(name);
     let scope;
     if (parentLi) {
       scope = getChildrenContainer(parentLi);
-      if (!scope) return null; // children not yet in DOM
+      if (!scope) return null;
     } else {
       scope = document;
     }
@@ -221,23 +215,28 @@
   }
 
   /**
-   * Scrolls a treeitem into view, then expands it if collapsed.
-   * Waits for BOTH aria-expanded to flip AND the children <ul> to appear
-   * in the DOM (PrimeNG uses *ngIf, so the ul is only added after expand).
+   * Scrolls a treeitem into view, then expands it if it is not already open.
+   *
+   * KEY FIX: the skip condition is now `=== 'true'` (explicitly expanded).
+   * Previously it was `!== 'false'`, which also returned early when the
+   * attribute was null — i.e. nodes that had never been interacted with
+   * on a fresh page load, causing all expansions to be silently skipped.
    */
   async function expandItem(li) {
     await scrollIntoView(li);
 
-    if (li.getAttribute('aria-expanded') !== 'false') return; // already open
+    // Only skip if the node is confirmed open. null / 'false' / absent → expand.
+    if (li.getAttribute('aria-expanded') === 'true') return;
 
     const toggler = li.querySelector('button.p-tree-toggler');
-    if (!toggler) return; // leaf node
+    if (!toggler) return; // leaf node — nothing to expand
 
     toggler.click();
 
-    // Wait until the node is open AND its children container exists in the DOM
+    // Wait until the attribute confirms expansion AND the children <ul>
+    // exists in the DOM (PrimeNG adds it via *ngIf, not display:none).
     await waitFor(() => {
-      const open       = li.getAttribute('aria-expanded') !== 'false';
+      const open        = li.getAttribute('aria-expanded') === 'true';
       const hasChildren = !!getChildrenContainer(li);
       return (open && hasChildren) ? li : null;
     }, CFG.waitTimeout).catch(() => null);
@@ -247,19 +246,19 @@
 
   /**
    * Resolves the correct treeitem for a CSV row by navigating
-   * Category → Topic → Intent, expanding each level as needed.
+   * Category → Topic → Intent, expanding collapsed nodes as needed.
    */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
-    // ── Level 1: Category (always visible, no parent scope needed) ──
+    // ── Level 1: Category (always visible) ──
     const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
     if (!catItem) { log(`Category not found: "${category}"`, 'error'); return null; }
     if (!topic) return catItem;
 
-    // ── Level 2: expand category, wait for topic to appear in sibling ul ──
+    // ── Level 2: expand category, wait for topic ──
     await expandItem(catItem);
     const topicItem = await waitFor(
       () => findItem(topic, 2, catItem), CFG.waitTimeout
@@ -267,7 +266,7 @@
     if (!topicItem) { log(`Topic not found: "${topic}" under "${category}"`, 'error'); return null; }
     if (!intent) return topicItem;
 
-    // ── Level 3: expand topic, wait for intent to appear in sibling ul ──
+    // ── Level 3: expand topic, wait for intent ──
     await expandItem(topicItem);
     const intentItem = await waitFor(
       () => findItem(intent, 3, topicItem), CFG.waitTimeout
