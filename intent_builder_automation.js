@@ -16,12 +16,8 @@
  * Supported Actions:
  *   Rename  — renames the item to the value in "Required Change"
  *   Remove  — removes the item (confirms the popup)
- *   Move    — moves the item to the destination in "Required Change"
- *   Merge   — merges the item with the target in "Required Change"
- *
- * "Required Change" for Move/Merge supports two formats:
- *   Plain name:          "Payment Processing"          (searched across all levels)
- *   Path (recommended):  "BILLING & PAYMENT > Payment Processing"
+ *   Move    — moves to destination in "Required Change" (format: "Category" or "Category > Topic" or "Category > Topic > Intent")
+ *   Merge   — merges with target in "Required Change" (same format as Move)
  */
 
 (async function intentBuilderAutomation() {
@@ -33,7 +29,7 @@
     shortDelay:  400,
     actionDelay: 700,
     dialogDelay: 1200,
-    waitTimeout: 10000,  // slightly longer for dialog tree
+    waitTimeout: 8000,
     scrollDelay: 300,
   };
 
@@ -90,11 +86,13 @@
   }
 
   async function tryCloseDialog() {
+    // Covers both the main tree dialogs and the Move/Merge cxone-modal
     const btn = document.querySelector([
+      'i.close-button',
+      'button.cancel-btn',
       'p-dialog .p-dialog-header-close',
       '.p-dialog .p-dialog-header-close',
       '[role="dialog"] button[aria-label="Close"]',
-      '[role="dialog"] button[aria-label="close"]',
     ].join(','));
     if (btn) { btn.click(); await sleep(CFG.dialogDelay); }
   }
@@ -162,7 +160,7 @@
 
 
   // ─────────────────────────────────────────────
-  // TREE NAVIGATION  (shared by main tree and dialog tree)
+  // MAIN TREE NAVIGATION  (PrimeNG p-tree)
   // ─────────────────────────────────────────────
 
   const normalize = s => (s || '').trim().toLowerCase();
@@ -172,11 +170,6 @@
     return el ? normalize(el.textContent) : normalize(li.getAttribute('aria-label'));
   }
 
-  /**
-   * Returns the <ul> that holds the direct children of a treeitem.
-   * Handles both standard HTML (ul inside li) and PrimeNG's sibling pattern
-   * (ul is a sibling of li inside a <p-treenode> wrapper).
-   */
   function getChildrenContainer(li) {
     const inner = li.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
     if (inner) return inner;
@@ -188,20 +181,14 @@
     return null;
   }
 
-  /**
-   * Finds a treeitem by name at the given aria-level.
-   * - parentLi: scope search to that node's children container.
-   * - rootScope: when parentLi is null, use this element instead of document
-   *   (useful for scoping to a dialog).
-   */
-  function findItem(name, level, parentLi = null, rootScope = document) {
+  function findItem(name, level, parentLi = null) {
     const n = normalize(name);
     let scope;
     if (parentLi) {
       scope = getChildrenContainer(parentLi);
       if (!scope) return null;
     } else {
-      scope = rootScope;
+      scope = document;
     }
     for (const li of scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`)) {
       if (getItemName(li) === n) return li;
@@ -209,16 +196,11 @@
     return null;
   }
 
-  /**
-   * Expands a treeitem if not already open.
-   * Uses `=== 'true'` so nodes with aria-expanded=null (never interacted with
-   * on a fresh page load) are also expanded.
-   */
   async function expandItem(li) {
     await scrollIntoView(li);
-    if (li.getAttribute('aria-expanded') === 'true') return; // confirmed open
+    if (li.getAttribute('aria-expanded') === 'true') return;
     const toggler = li.querySelector('button.p-tree-toggler');
-    if (!toggler) return; // leaf node
+    if (!toggler) return;
     toggler.click();
     await waitFor(() => {
       const open        = li.getAttribute('aria-expanded') === 'true';
@@ -228,10 +210,6 @@
     await sleep(CFG.shortDelay);
   }
 
-  /**
-   * Navigates the main tree to find the target item for a CSV row.
-   * Expands Category → Topic → Intent as needed.
-   */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
@@ -256,118 +234,7 @@
 
 
   // ─────────────────────────────────────────────
-  // DIALOG TREE NAVIGATION  (Move / Merge popup)
-  // ─────────────────────────────────────────────
-
-  /**
-   * Locates and clicks the destination node inside the Move/Merge dialog.
-   *
-   * The dialog contains the same PrimeNG tree (fully collapsed by default).
-   * We expand it the same way we expand the main tree.
-   *
-   * destination format ("Required Change" column):
-   *   Path (preferred): "CATEGORY > Topic"  or  "CATEGORY > Topic > Intent"
-   *   Plain name:       "Topic Name"   (scans all levels until found)
-   */
-  async function selectDestinationInDialog(destination) {
-    // Wait for the dialog and its tree to be ready
-    const dialog = await waitFor(() =>
-      document.querySelector('p-dialog, .p-dialog, [role="dialog"], mat-dialog-container'),
-      CFG.waitTimeout
-    );
-    await sleep(CFG.shortDelay); // small buffer for tree to render
-
-    const parts = destination.split('>').map(s => s.trim()).filter(Boolean);
-
-    if (parts.length > 1) {
-      // ── Path-based navigation ──
-      await navigateDialogByPath(dialog, parts);
-    } else {
-      // ── Single name: expand tree level by level to find it ──
-      await navigateDialogByName(dialog, destination);
-    }
-  }
-
-  /**
-   * Navigate using an explicit path array, e.g. ["CATEGORY", "Topic", "Intent"].
-   * Clicks the last element in the path.
-   */
-  async function navigateDialogByPath(dialog, parts) {
-    // Level 1
-    const l1 = await waitFor(
-      () => findItem(parts[0], 1, null, dialog), CFG.waitTimeout
-    ).catch(() => null);
-    if (!l1) throw new Error(`Destination L1 not found: "${parts[0]}"`);
-    if (parts.length === 1) { await scrollIntoView(l1); l1.click(); return; }
-
-    // Level 2
-    await expandItem(l1);
-    const l2 = await waitFor(
-      () => findItem(parts[1], 2, l1), CFG.waitTimeout
-    ).catch(() => null);
-    if (!l2) throw new Error(`Destination L2 not found: "${parts[1]}"`);
-    if (parts.length === 2) { await scrollIntoView(l2); l2.click(); return; }
-
-    // Level 3
-    await expandItem(l2);
-    const l3 = await waitFor(
-      () => findItem(parts[2], 3, l2), CFG.waitTimeout
-    ).catch(() => null);
-    if (!l3) throw new Error(`Destination L3 not found: "${parts[2]}"`);
-    await scrollIntoView(l3); l3.click();
-  }
-
-  /**
-   * Scan the dialog tree by expanding each level until the named item is found.
-   * Checks L1 first, then expands each L1 to check L2, then L2 to check L3.
-   */
-  async function navigateDialogByName(dialog, name) {
-    const n = normalize(name);
-
-    // Wait for at least one Level-1 item to be present
-    await waitFor(
-      () => dialog.querySelector('li[role="treeitem"][aria-level="1"]'),
-      CFG.waitTimeout
-    );
-
-    const l1Items = Array.from(dialog.querySelectorAll('li[role="treeitem"][aria-level="1"]'));
-
-    for (const l1 of l1Items) {
-      // Check Level 1
-      if (getItemName(l1) === n) {
-        await scrollIntoView(l1); l1.click(); return;
-      }
-
-      // Expand and check Level 2
-      await expandItem(l1);
-      const l1Container = getChildrenContainer(l1);
-      if (!l1Container) continue;
-
-      const l2Items = Array.from(l1Container.querySelectorAll('li[role="treeitem"][aria-level="2"]'));
-      for (const l2 of l2Items) {
-        if (getItemName(l2) === n) {
-          await scrollIntoView(l2); l2.click(); return;
-        }
-
-        // Expand and check Level 3
-        await expandItem(l2);
-        const l2Container = getChildrenContainer(l2);
-        if (!l2Container) continue;
-
-        for (const l3 of l2Container.querySelectorAll('li[role="treeitem"][aria-level="3"]')) {
-          if (getItemName(l3) === n) {
-            await scrollIntoView(l3); l3.click(); return;
-          }
-        }
-      }
-    }
-
-    throw new Error(`Destination "${name}" not found in Move/Merge dialog tree`);
-  }
-
-
-  // ─────────────────────────────────────────────
-  // MENU HELPERS
+  // MAIN TREE MENU HELPERS
   // ─────────────────────────────────────────────
 
   async function openMoreMenu(li) {
@@ -415,6 +282,167 @@
 
 
   // ─────────────────────────────────────────────
+  // MOVE / MERGE — AG-GRID POPUP NAVIGATION
+  //
+  // The Move/Merge dialog uses AG-Grid (not p-tree).
+  // Rows: div[role="row"] with class ag-row-level-0 / ag-row-level-1 / ag-row-level-2
+  // Name: span[data-aid="ellipsis-sliced-text"] inside each row
+  // Expand: click .ag-group-contracted span inside the row
+  // Save:   button.save-btn  (disabled until a row is clicked)
+  //
+  // "Required Change" format:
+  //   "Category"                    — move/merge into a category
+  //   "Category > Topic"            — move/merge into a topic
+  //   "Category > Topic > Intent"   — move/merge into an intent
+  // ─────────────────────────────────────────────
+
+  /** Returns the display name of an AG-Grid row. */
+  function getGridRowName(row) {
+    const el = row.querySelector('span[data-aid="ellipsis-sliced-text"]');
+    return el ? normalize(el.textContent) : '';
+  }
+
+  /** Returns the hierarchy level (0, 1, 2…) of an AG-Grid row. */
+  function getGridRowLevel(row) {
+    const m = (row.className || '').match(/ag-row-level-(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  /** True if the row has children (is a group node). */
+  function isGridRowExpandable(row) {
+    return row.classList.contains('ag-row-group');
+  }
+
+  /** True if the row is currently expanded. */
+  function isGridRowExpanded(row) {
+    return row.getAttribute('aria-expanded') === 'true';
+  }
+
+  /** Expands an AG-Grid row by clicking its contracted icon. */
+  async function expandGridRow(row) {
+    if (!isGridRowExpandable(row) || isGridRowExpanded(row)) return;
+    const icon = row.querySelector('.ag-group-contracted:not(.ag-hidden)');
+    if (!icon) return;
+    icon.click();
+    // Wait for aria-expanded to flip
+    await waitFor(
+      () => row.getAttribute('aria-expanded') === 'true' ? row : null,
+      5000
+    ).catch(() => null);
+    await sleep(300);
+  }
+
+  /** Returns all currently-rendered AG-Grid rows at a specific level. */
+  function getGridRows(level) {
+    return Array.from(
+      document.querySelectorAll(`[role="treegrid"] [role="row"].ag-row-level-${level}`)
+    );
+  }
+
+  /** Finds a visible AG-Grid row by name and level. */
+  function findGridRow(name, level) {
+    const n = normalize(name);
+    for (const row of getGridRows(level)) {
+      if (getGridRowName(row) === n) return row;
+    }
+    return null;
+  }
+
+  /**
+   * Navigates the AG-Grid in the Move/Merge dialog and clicks the destination row.
+   *
+   * destination formats:
+   *   "Category"                   → click the Level-0 category row
+   *   "Category > Topic"           → expand category, click Level-1 topic row
+   *   "Category > Topic > Intent"  → expand both, click Level-2 intent row
+   */
+  async function selectDestination(destination) {
+    await sleep(CFG.dialogDelay);
+
+    // Wait for the AG-Grid treegrid to appear inside the modal
+    await waitFor(
+      () => document.querySelector('[role="treegrid"]'),
+      CFG.waitTimeout
+    );
+    await sleep(CFG.shortDelay);
+
+    const parts = destination.split('>').map(s => s.trim()).filter(Boolean);
+    log(`  Navigating dialog to: ${parts.join(' > ')}`);
+
+    if (parts.length === 1) {
+      // ── Single name: scan levels 0 → 1 → 2 ──────────────────────────
+      const n = normalize(parts[0]);
+
+      // Check Level 0 first (always visible)
+      let target = findGridRow(parts[0], 0);
+      if (target) { await scrollIntoView(target); target.click(); }
+      else {
+        // Expand each Level-0 row and look in Level 1
+        let found = false;
+        for (const l0 of getGridRows(0)) {
+          await expandGridRow(l0);
+          target = findGridRow(parts[0], 1);
+          if (target) { await scrollIntoView(target); target.click(); found = true; break; }
+
+          // Expand each Level-1 row and look in Level 2
+          for (const l1 of getGridRows(1)) {
+            await expandGridRow(l1);
+            target = findGridRow(parts[0], 2);
+            if (target) { await scrollIntoView(target); target.click(); found = true; break; }
+          }
+          if (found) break;
+        }
+        if (!target) throw new Error(`Move/Merge dialog: "${destination}" not found`);
+      }
+
+    } else if (parts.length === 2) {
+      // ── Category > Topic ─────────────────────────────────────────────
+      const l0 = await waitFor(() => findGridRow(parts[0], 0), CFG.waitTimeout).catch(() => null);
+      if (!l0) throw new Error(`Move/Merge dialog: Category "${parts[0]}" not found`);
+      log(`  Found Category "${parts[0]}", expanding...`);
+      await expandGridRow(l0);
+
+      const l1 = await waitFor(() => findGridRow(parts[1], 1), 5000).catch(() => null);
+      if (!l1) throw new Error(`Move/Merge dialog: Topic "${parts[1]}" not found under "${parts[0]}"`);
+      log(`  Found Topic "${parts[1]}", clicking...`);
+      await scrollIntoView(l1);
+      l1.click();
+
+    } else {
+      // ── Category > Topic > Intent ─────────────────────────────────────
+      const l0 = await waitFor(() => findGridRow(parts[0], 0), CFG.waitTimeout).catch(() => null);
+      if (!l0) throw new Error(`Move/Merge dialog: Category "${parts[0]}" not found`);
+      log(`  Found Category "${parts[0]}", expanding...`);
+      await expandGridRow(l0);
+
+      const l1 = await waitFor(() => findGridRow(parts[1], 1), 5000).catch(() => null);
+      if (!l1) throw new Error(`Move/Merge dialog: Topic "${parts[1]}" not found`);
+      log(`  Found Topic "${parts[1]}", expanding...`);
+      await expandGridRow(l1);
+
+      const l2 = await waitFor(() => findGridRow(parts[2], 2), 5000).catch(() => null);
+      if (!l2) throw new Error(`Move/Merge dialog: Intent "${parts[2]}" not found`);
+      log(`  Found Intent "${parts[2]}", clicking...`);
+      await scrollIntoView(l2);
+      l2.click();
+    }
+
+    await sleep(CFG.shortDelay);
+
+    // Save button becomes enabled once a row is selected
+    const saveBtn = await waitFor(
+      () => {
+        const btn = document.querySelector('button.save-btn');
+        return (btn && !btn.disabled) ? btn : null;
+      },
+      5000
+    );
+    saveBtn.click();
+    await sleep(CFG.dialogDelay);
+  }
+
+
+  // ─────────────────────────────────────────────
   // ACTION HANDLERS
   // ─────────────────────────────────────────────
 
@@ -442,16 +470,14 @@
   async function performMove(li, destination) {
     await openMoreMenu(li);
     await clickMenuOption('Move');
-    await selectDestinationInDialog(destination);
-    await clickDialogButton('save', 'move', 'confirm', 'ok');
+    await selectDestination(destination);
     log(`  Moved → "${destination}"`, 'success');
   }
 
   async function performMerge(li, target) {
     await openMoreMenu(li);
     await clickMenuOption('Merge');
-    await selectDestinationInDialog(target);
-    await clickDialogButton('save', 'merge', 'confirm', 'ok');
+    await selectDestination(target);
     log(`  Merged → "${target}"`, 'success');
   }
 
