@@ -18,6 +18,10 @@
  *   Remove  — removes the item (confirms the popup)
  *   Move    — moves the item to the destination in "Required Change"
  *   Merge   — merges the item with the target in "Required Change"
+ *
+ * "Required Change" for Move/Merge supports two formats:
+ *   Plain name:          "Payment Processing"          (searched across all levels)
+ *   Path (recommended):  "BILLING & PAYMENT > Payment Processing"
  */
 
 (async function intentBuilderAutomation() {
@@ -26,10 +30,11 @@
   // CONFIGURATION
   // ─────────────────────────────────────────────
   const CFG = {
-    shortDelay:  400,   // ms – between micro-steps
-    actionDelay: 700,   // ms – after opening a menu / typing
-    dialogDelay: 1200,  // ms – after a dialog opens or closes
-    waitTimeout: 8000,  // ms – max time to wait for a DOM element
+    shortDelay:  400,
+    actionDelay: 700,
+    dialogDelay: 1200,
+    waitTimeout: 10000,  // slightly longer for dialog tree
+    scrollDelay: 300,
   };
 
 
@@ -52,9 +57,6 @@
   // ─────────────────────────────────────────────
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  /**
-   * Polls until selectorFn() returns a truthy value or timeout is reached.
-   */
   function waitFor(selectorFn, timeout = CFG.waitTimeout) {
     return new Promise((resolve, reject) => {
       const deadline = Date.now() + timeout;
@@ -63,15 +65,12 @@
         if (el) { clearInterval(iv); resolve(el); }
         else if (Date.now() > deadline) {
           clearInterval(iv);
-          reject(new Error('waitFor timeout: element not found'));
+          reject(new Error('waitFor timeout'));
         }
       }, 100);
     });
   }
 
-  /**
-   * Sets an input's value in a way Angular's change detection picks up.
-   */
   function setInputValue(input, value) {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     setter.call(input, value);
@@ -79,64 +78,63 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  /**
-   * Fires mouseenter + mouseover on an element (reveals hover-only buttons).
-   */
   async function hoverOver(el) {
     el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseover',  { bubbles: true }));
     await sleep(CFG.shortDelay);
   }
 
-  /**
-   * Closes any open dialog by clicking its close / cancel button.
-   * Used for error recovery.
-   */
+  async function scrollIntoView(el) {
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    await sleep(CFG.scrollDelay);
+  }
+
   async function tryCloseDialog() {
-    const sel = [
+    const btn = document.querySelector([
       'p-dialog .p-dialog-header-close',
       '.p-dialog .p-dialog-header-close',
       '[role="dialog"] button[aria-label="Close"]',
       '[role="dialog"] button[aria-label="close"]',
-      '[role="dialog"] .p-dialog-header-close',
-    ].join(', ');
-    const btn = document.querySelector(sel);
+    ].join(','));
     if (btn) { btn.click(); await sleep(CFG.dialogDelay); }
   }
 
 
   // ─────────────────────────────────────────────
-  // CSV PARSING
+  // CSV PARSING  (RFC 4180 — handles multi-line quoted fields)
   // ─────────────────────────────────────────────
   function parseCSV(text) {
-    const lines = text.split(/\r?\n/).filter(l => l.trim());
-    if (lines.length < 2) throw new Error('CSV has no data rows');
-
-    // Parse a single line respecting quoted fields
-    function parseLine(line) {
-      const fields = [];
-      let cur = '', inQ = false;
-      for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (ch === '"') {
-          // Handle escaped quotes ("")
-          if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
-          else inQ = !inQ;
-        } else if (ch === ',' && !inQ) {
-          fields.push(cur.trim()); cur = '';
-        } else {
-          cur += ch;
-        }
+    const records = [];
+    let field = '', fields = [], inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i], next = text[i + 1];
+      if (inQuotes) {
+        if (ch === '"' && next === '"') { field += '"'; i++; }
+        else if (ch === '"')            { inQuotes = false; }
+        else                            { field += ch; }
+      } else {
+        if      (ch === '"')                   { inQuotes = true; }
+        else if (ch === ',')                   { fields.push(field.trim()); field = ''; }
+        else if (ch === '\r' && next === '\n') {
+          fields.push(field.trim()); field = '';
+          if (fields.some(f => f !== '')) records.push(fields);
+          fields = []; i++;
+        } else if (ch === '\n' || ch === '\r') {
+          fields.push(field.trim()); field = '';
+          if (fields.some(f => f !== '')) records.push(fields);
+          fields = [];
+        } else { field += ch; }
       }
-      fields.push(cur.trim());
-      return fields;
     }
-
-    const headers = parseLine(lines[0]);
-    return lines.slice(1).map(line => {
-      const vals = parseLine(line);
+    if (field || fields.length > 0) {
+      fields.push(field.trim());
+      if (fields.some(f => f !== '')) records.push(fields);
+    }
+    if (records.length < 2) throw new Error('CSV has no data rows');
+    const headers = records[0].map(h => h.replace(/^"|"$/g, '').trim());
+    return records.slice(1).map(cols => {
       const row = {};
-      headers.forEach((h, i) => row[h] = (vals[i] || '').replace(/^"|"$/g, '').trim());
+      headers.forEach((h, i) => { row[h] = (cols[i] || '').replace(/^"|"$/g, '').trim(); });
       return row;
     });
   }
@@ -148,9 +146,7 @@
   function pickCSVFile() {
     return new Promise((resolve, reject) => {
       const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.csv,text/csv';
-      input.style.display = 'none';
+      input.type = 'file'; input.accept = '.csv,text/csv'; input.style.display = 'none';
       document.body.appendChild(input);
       input.onchange = e => {
         const file = e.target.files[0];
@@ -166,81 +162,207 @@
 
 
   // ─────────────────────────────────────────────
-  // TREE NAVIGATION
+  // TREE NAVIGATION  (shared by main tree and dialog tree)
   // ─────────────────────────────────────────────
 
   const normalize = s => (s || '').trim().toLowerCase();
 
-  /**
-   * Returns the display name of a treeitem element.
-   * Prefers .kanban-tree-node-name text; falls back to aria-label.
-   */
   function getItemName(li) {
-    const nameEl = li.querySelector('.kanban-tree-node-name');
-    if (nameEl) return normalize(nameEl.textContent);
-    return normalize(li.getAttribute('aria-label'));
+    const el = li.querySelector('.kanban-tree-node-name');
+    return el ? normalize(el.textContent) : normalize(li.getAttribute('aria-label'));
   }
 
   /**
-   * Finds a treeitem at the given aria-level whose display name matches.
-   * Optionally restricts search to within a parent element.
+   * Returns the <ul> that holds the direct children of a treeitem.
+   * Handles both standard HTML (ul inside li) and PrimeNG's sibling pattern
+   * (ul is a sibling of li inside a <p-treenode> wrapper).
    */
-  function findItem(name, level, parent = document) {
+  function getChildrenContainer(li) {
+    const inner = li.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
+    if (inner) return inner;
+    const wrapper = li.parentElement;
+    if (wrapper) {
+      const sibling = wrapper.querySelector(':scope > ul[role="group"], :scope > ul.p-treenode-children');
+      if (sibling) return sibling;
+    }
+    return null;
+  }
+
+  /**
+   * Finds a treeitem by name at the given aria-level.
+   * - parentLi: scope search to that node's children container.
+   * - rootScope: when parentLi is null, use this element instead of document
+   *   (useful for scoping to a dialog).
+   */
+  function findItem(name, level, parentLi = null, rootScope = document) {
     const n = normalize(name);
-    const items = parent.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`);
-    for (const li of items) {
+    let scope;
+    if (parentLi) {
+      scope = getChildrenContainer(parentLi);
+      if (!scope) return null;
+    } else {
+      scope = rootScope;
+    }
+    for (const li of scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`)) {
       if (getItemName(li) === n) return li;
     }
     return null;
   }
 
   /**
-   * Expands a treeitem if it is currently collapsed.
+   * Expands a treeitem if not already open.
+   * Uses `=== 'true'` so nodes with aria-expanded=null (never interacted with
+   * on a fresh page load) are also expanded.
    */
-  async function ensureExpanded(li) {
-    if (li.getAttribute('aria-expanded') === 'false') {
-      const toggler = li.querySelector('button.p-tree-toggler');
-      if (toggler) { toggler.click(); await sleep(CFG.actionDelay); }
-    }
+  async function expandItem(li) {
+    await scrollIntoView(li);
+    if (li.getAttribute('aria-expanded') === 'true') return; // confirmed open
+    const toggler = li.querySelector('button.p-tree-toggler');
+    if (!toggler) return; // leaf node
+    toggler.click();
+    await waitFor(() => {
+      const open        = li.getAttribute('aria-expanded') === 'true';
+      const hasChildren = !!getChildrenContainer(li);
+      return (open && hasChildren) ? li : null;
+    }, CFG.waitTimeout).catch(() => null);
+    await sleep(CFG.shortDelay);
   }
 
   /**
-   * Locates the target treeitem described by a CSV row.
-   * Handles all three levels (Category → Topic → Intent).
+   * Navigates the main tree to find the target item for a CSV row.
+   * Expands Category → Topic → Intent as needed.
    */
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
-    // ── Level 1: Category ──
-    const catItem = findItem(category, 1);
-    if (!catItem) {
-      log(`Category not found: "${category}"`, 'error');
-      return null;
-    }
+    const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
+    if (!catItem) { log(`Category not found: "${category}"`, 'error'); return null; }
+    if (!topic) return catItem;
 
-    if (!topic) return catItem; // action targets the category itself
+    await expandItem(catItem);
+    const topicItem = await waitFor(() => findItem(topic, 2, catItem), CFG.waitTimeout).catch(() => null);
+    if (!topicItem) { log(`Topic not found: "${topic}" under "${category}"`, 'error'); return null; }
+    if (!intent) return topicItem;
 
-    // ── Level 2: Topic ──
-    await ensureExpanded(catItem);
-    const topicItem = findItem(topic, 2, catItem);
-    if (!topicItem) {
-      log(`Topic not found: "${topic}" under "${category}"`, 'error');
-      return null;
-    }
+    await expandItem(topicItem);
+    const intentItem = await waitFor(() => findItem(intent, 3, topicItem), CFG.waitTimeout).catch(() => null);
+    if (!intentItem) { log(`Intent not found: "${intent}" under "${topic}" > "${category}"`, 'error'); return null; }
 
-    if (!intent) return topicItem; // action targets the topic itself
-
-    // ── Level 3: Intent ──
-    await ensureExpanded(topicItem);
-    const intentItem = findItem(intent, 3, topicItem);
-    if (!intentItem) {
-      log(`Intent not found: "${intent}" under "${topic}" > "${category}"`, 'error');
-      return null;
-    }
-
+    await scrollIntoView(intentItem);
     return intentItem;
+  }
+
+
+  // ─────────────────────────────────────────────
+  // DIALOG TREE NAVIGATION  (Move / Merge popup)
+  // ─────────────────────────────────────────────
+
+  /**
+   * Locates and clicks the destination node inside the Move/Merge dialog.
+   *
+   * The dialog contains the same PrimeNG tree (fully collapsed by default).
+   * We expand it the same way we expand the main tree.
+   *
+   * destination format ("Required Change" column):
+   *   Path (preferred): "CATEGORY > Topic"  or  "CATEGORY > Topic > Intent"
+   *   Plain name:       "Topic Name"   (scans all levels until found)
+   */
+  async function selectDestinationInDialog(destination) {
+    // Wait for the dialog and its tree to be ready
+    const dialog = await waitFor(() =>
+      document.querySelector('p-dialog, .p-dialog, [role="dialog"], mat-dialog-container'),
+      CFG.waitTimeout
+    );
+    await sleep(CFG.shortDelay); // small buffer for tree to render
+
+    const parts = destination.split('>').map(s => s.trim()).filter(Boolean);
+
+    if (parts.length > 1) {
+      // ── Path-based navigation ──
+      await navigateDialogByPath(dialog, parts);
+    } else {
+      // ── Single name: expand tree level by level to find it ──
+      await navigateDialogByName(dialog, destination);
+    }
+  }
+
+  /**
+   * Navigate using an explicit path array, e.g. ["CATEGORY", "Topic", "Intent"].
+   * Clicks the last element in the path.
+   */
+  async function navigateDialogByPath(dialog, parts) {
+    // Level 1
+    const l1 = await waitFor(
+      () => findItem(parts[0], 1, null, dialog), CFG.waitTimeout
+    ).catch(() => null);
+    if (!l1) throw new Error(`Destination L1 not found: "${parts[0]}"`);
+    if (parts.length === 1) { await scrollIntoView(l1); l1.click(); return; }
+
+    // Level 2
+    await expandItem(l1);
+    const l2 = await waitFor(
+      () => findItem(parts[1], 2, l1), CFG.waitTimeout
+    ).catch(() => null);
+    if (!l2) throw new Error(`Destination L2 not found: "${parts[1]}"`);
+    if (parts.length === 2) { await scrollIntoView(l2); l2.click(); return; }
+
+    // Level 3
+    await expandItem(l2);
+    const l3 = await waitFor(
+      () => findItem(parts[2], 3, l2), CFG.waitTimeout
+    ).catch(() => null);
+    if (!l3) throw new Error(`Destination L3 not found: "${parts[2]}"`);
+    await scrollIntoView(l3); l3.click();
+  }
+
+  /**
+   * Scan the dialog tree by expanding each level until the named item is found.
+   * Checks L1 first, then expands each L1 to check L2, then L2 to check L3.
+   */
+  async function navigateDialogByName(dialog, name) {
+    const n = normalize(name);
+
+    // Wait for at least one Level-1 item to be present
+    await waitFor(
+      () => dialog.querySelector('li[role="treeitem"][aria-level="1"]'),
+      CFG.waitTimeout
+    );
+
+    const l1Items = Array.from(dialog.querySelectorAll('li[role="treeitem"][aria-level="1"]'));
+
+    for (const l1 of l1Items) {
+      // Check Level 1
+      if (getItemName(l1) === n) {
+        await scrollIntoView(l1); l1.click(); return;
+      }
+
+      // Expand and check Level 2
+      await expandItem(l1);
+      const l1Container = getChildrenContainer(l1);
+      if (!l1Container) continue;
+
+      const l2Items = Array.from(l1Container.querySelectorAll('li[role="treeitem"][aria-level="2"]'));
+      for (const l2 of l2Items) {
+        if (getItemName(l2) === n) {
+          await scrollIntoView(l2); l2.click(); return;
+        }
+
+        // Expand and check Level 3
+        await expandItem(l2);
+        const l2Container = getChildrenContainer(l2);
+        if (!l2Container) continue;
+
+        for (const l3 of l2Container.querySelectorAll('li[role="treeitem"][aria-level="3"]')) {
+          if (getItemName(l3) === n) {
+            await scrollIntoView(l3); l3.click(); return;
+          }
+        }
+      }
+    }
+
+    throw new Error(`Destination "${name}" not found in Move/Merge dialog tree`);
   }
 
 
@@ -248,9 +370,6 @@
   // MENU HELPERS
   // ─────────────────────────────────────────────
 
-  /**
-   * Hovers over a treeitem and clicks its three-dot (kanban-more-button).
-   */
   async function openMoreMenu(li) {
     await hoverOver(li);
     const btn = await waitFor(() => li.querySelector('button.kanban-more-button'));
@@ -258,55 +377,34 @@
     await sleep(CFG.actionDelay);
   }
 
-  /**
-   * Finds and clicks a menu option whose visible text contains `label`.
-   * Searches inside any currently-visible overlay / context-menu.
-   */
   async function clickMenuOption(label) {
     const target = normalize(label);
     const el = await waitFor(() => {
-      // Candidate containers for the floating menu
       const containers = document.querySelectorAll([
-        'p-overlaypanel',
-        '.p-overlaypanel',
-        '.p-menu',
-        '.p-contextmenu',
-        '[role="menu"]',
-        '.cxone-menu',
-        '.dropdown-menu',
-        '.context-menu',
+        'p-overlaypanel', '.p-overlaypanel', '.p-menu', '.p-contextmenu',
+        '[role="menu"]', '.cxone-menu', '.dropdown-menu', '.context-menu',
       ].join(','));
-
       for (const c of containers) {
-        if (!c.offsetParent && c.style.display === 'none') continue; // hidden
-        const items = c.querySelectorAll('li, [role="menuitem"], button, a');
-        for (const item of items) {
+        if (!c.offsetParent && c.style.display === 'none') continue;
+        for (const item of c.querySelectorAll('li, [role="menuitem"], button, a')) {
           if (normalize(item.textContent).includes(target)) return item;
         }
       }
-
-      // Fallback: any visible element exactly matching the label
       for (const el of document.querySelectorAll('li, [role="menuitem"], button.p-menuitem-link')) {
         if (normalize(el.textContent).trim() === target && el.offsetParent !== null) return el;
       }
       return null;
     });
-
     el.click();
     await sleep(CFG.actionDelay);
   }
 
-  /**
-   * Finds a button inside an open dialog whose text matches one of the provided labels.
-   */
   async function clickDialogButton(...labels) {
     const targets = labels.map(normalize);
     const btn = await waitFor(() => {
-      const dialogs = document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container');
-      for (const d of dialogs) {
+      for (const d of document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container')) {
         for (const b of d.querySelectorAll('button')) {
-          const t = normalize(b.textContent).trim();
-          if (targets.includes(t) && !b.disabled) return b;
+          if (targets.includes(normalize(b.textContent).trim()) && !b.disabled) return b;
         }
       }
       return null;
@@ -320,111 +418,40 @@
   // ACTION HANDLERS
   // ─────────────────────────────────────────────
 
-  // ── RENAME ──────────────────────────────────
   async function performRename(li, newName) {
     await openMoreMenu(li);
     await clickMenuOption('Rename');
-
-    // Locate text input in the rename dialog
-    const input = await waitFor(() =>
-      document.querySelector([
-        'p-dialog input[type="text"]',
-        '.p-dialog input[type="text"]',
-        '[role="dialog"] input[type="text"]',
-        'mat-dialog-container input[type="text"]',
-      ].join(','))
-    );
-
-    input.focus();
-    input.select();
+    const input = await waitFor(() => document.querySelector([
+      'p-dialog input[type="text"]', '.p-dialog input[type="text"]',
+      '[role="dialog"] input[type="text"]', 'mat-dialog-container input[type="text"]',
+    ].join(',')));
+    input.focus(); input.select();
     setInputValue(input, newName);
     await sleep(CFG.shortDelay);
-
     await clickDialogButton('rename', 'save', 'confirm', 'ok');
     log(`  Renamed → "${newName}"`, 'success');
   }
 
-
-  // ── REMOVE ──────────────────────────────────
   async function performRemove(li) {
     await openMoreMenu(li);
     await clickMenuOption('Remove');
-
     await clickDialogButton('remove', 'delete', 'confirm', 'yes');
     log('  Removed', 'success');
   }
 
-
-  // ── SHARED: select destination in Move/Merge dialog ──
-  async function selectDestination(destination) {
-    await sleep(CFG.dialogDelay); // wait for dialog to fully render
-
-    // Try to use the search box inside the dialog
-    const searchInput = await waitFor(() =>
-      document.querySelector([
-        'p-dialog input[type="search"]',
-        '.p-dialog input[type="search"]',
-        '[role="dialog"] input[type="search"]',
-        'p-dialog input[placeholder*="Search" i]',
-        '.p-dialog input[placeholder*="Search" i]',
-        '[role="dialog"] input[placeholder*="Search" i]',
-        'p-dialog input[placeholder*="search" i]',
-        '[role="dialog"] input[type="text"]',
-      ].join(','))
-    ).catch(() => null);
-
-    if (searchInput) {
-      setInputValue(searchInput, destination);
-      await sleep(CFG.dialogDelay);
-    }
-
-    // Find and click the destination item inside the dialog tree
-    const destEl = await waitFor(() => {
-      const dialogs = document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container');
-      for (const d of dialogs) {
-        // Prefer .kanban-tree-node-name elements
-        for (const el of d.querySelectorAll('.kanban-tree-node-name')) {
-          if (normalize(el.textContent) === normalize(destination)) return el;
-        }
-        // Fall back to treeitem aria-label
-        for (const el of d.querySelectorAll('li[role="treeitem"]')) {
-          if (normalize(el.getAttribute('aria-label')) === normalize(destination)) return el;
-        }
-        // Generic text match on any visible element
-        for (const el of d.querySelectorAll('li, span, div')) {
-          if (
-            normalize(el.textContent).trim() === normalize(destination) &&
-            el.offsetParent !== null &&
-            !el.querySelector('li, span, div') // leaf node only
-          ) return el;
-        }
-      }
-      return null;
-    });
-
-    destEl.click();
-    await sleep(CFG.shortDelay);
-
-    await clickDialogButton('save', 'move', 'merge', 'confirm', 'ok');
-  }
-
-
-  // ── MOVE ────────────────────────────────────
   async function performMove(li, destination) {
     await openMoreMenu(li);
-    // The menu item may say "Move", "Move/Merge", or similar
     await clickMenuOption('Move');
-    await selectDestination(destination);
+    await selectDestinationInDialog(destination);
+    await clickDialogButton('save', 'move', 'confirm', 'ok');
     log(`  Moved → "${destination}"`, 'success');
   }
 
-
-  // ── MERGE ───────────────────────────────────
   async function performMerge(li, target) {
     await openMoreMenu(li);
-    // If the menu has a combined "Move/Merge" option, "Merge" text will match it
     await clickMenuOption('Merge');
-    await selectDestination(target);
+    await selectDestinationInDialog(target);
+    await clickDialogButton('save', 'merge', 'confirm', 'ok');
     log(`  Merged → "${target}"`, 'success');
   }
 
@@ -435,39 +462,27 @@
   async function run() {
     log('=== Intent Builder Automation Started ===');
 
-    // 1. Pick the CSV file
     let csvText;
-    try {
-      csvText = await pickCSVFile();
-    } catch (e) {
-      log('File selection cancelled or failed: ' + e.message, 'error');
-      return;
-    }
+    try { csvText = await pickCSVFile(); }
+    catch (e) { log('File selection failed: ' + e.message, 'error'); return; }
 
-    // 2. Parse CSV
     let rows;
-    try {
-      rows = parseCSV(csvText);
-    } catch (e) {
-      log('CSV parse error: ' + e.message, 'error');
-      return;
-    }
+    try { rows = parseCSV(csvText); }
+    catch (e) { log('CSV parse error: ' + e.message, 'error'); return; }
     log(`CSV loaded — ${rows.length} data rows`);
 
-    // 3. Process rows
     let success = 0, skipped = 0, errors = 0;
 
     for (let i = 0; i < rows.length; i++) {
       const row    = rows[i];
-      const rowNum = i + 2; // 1-based + header
+      const rowNum = i + 2;
       const action = (row['Action'] || '').trim();
       const change = (row['Required Change'] || '').trim();
       const label  = row['Intent'] || row['Topic'] || row['Category'] || '(unknown)';
 
       if (!action) {
         log(`Row ${rowNum}: No action — skipping "${label}"`, 'warn');
-        skipped++;
-        continue;
+        skipped++; continue;
       }
 
       log(`Row ${rowNum}: [${action}] "${label}"`);
@@ -477,32 +492,21 @@
         if (!target) { errors++; continue; }
 
         switch (action.toLowerCase()) {
-
           case 'rename':
-            if (!change) throw new Error('"Required Change" is empty for Rename');
-            await performRename(target, change);
-            break;
-
+            if (!change) throw new Error('"Required Change" is empty');
+            await performRename(target, change); break;
           case 'remove':
-            await performRemove(target);
-            break;
-
+            await performRemove(target); break;
           case 'move':
-            if (!change) throw new Error('"Required Change" is empty for Move');
-            await performMove(target, change);
-            break;
-
+            if (!change) throw new Error('"Required Change" is empty');
+            await performMove(target, change); break;
           case 'merge':
-            if (!change) throw new Error('"Required Change" is empty for Merge');
-            await performMerge(target, change);
-            break;
-
+            if (!change) throw new Error('"Required Change" is empty');
+            await performMerge(target, change); break;
           default:
             log(`Row ${rowNum}: Unknown action "${action}" — skipping`, 'warn');
-            skipped++;
-            continue;
+            skipped++; continue;
         }
-
         success++;
 
       } catch (e) {
@@ -511,7 +515,7 @@
         await tryCloseDialog();
       }
 
-      await sleep(CFG.shortDelay); // brief pause between rows
+      await sleep(CFG.shortDelay);
     }
 
     log(
