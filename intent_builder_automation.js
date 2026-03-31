@@ -290,6 +290,9 @@
   // Expand: click .ag-group-contracted span inside the row
   // Save:   button.save-btn  (disabled until a row is clicked)
   //
+  // AG-Grid uses virtual scrolling: rows outside the viewport are NOT in the DOM.
+  // scrollGridToFind() handles this by scrolling the AG-Grid body viewport.
+  //
   // "Required Change" format:
   //   "Category"                    — move/merge into a category
   //   "Category > Topic"            — move/merge into a topic
@@ -300,12 +303,6 @@
   function getGridRowName(row) {
     const el = row.querySelector('span[data-aid="ellipsis-sliced-text"]');
     return el ? normalize(el.textContent) : '';
-  }
-
-  /** Returns the hierarchy level (0, 1, 2…) of an AG-Grid row. */
-  function getGridRowLevel(row) {
-    const m = (row.className || '').match(/ag-row-level-(\d+)/);
-    return m ? parseInt(m[1], 10) : 0;
   }
 
   /** True if the row has children (is a group node). */
@@ -324,7 +321,6 @@
     const icon = row.querySelector('.ag-group-contracted:not(.ag-hidden)');
     if (!icon) return;
     icon.click();
-    // Wait for aria-expanded to flip
     await waitFor(
       () => row.getAttribute('aria-expanded') === 'true' ? row : null,
       5000
@@ -339,13 +335,59 @@
     );
   }
 
-  /** Finds a visible AG-Grid row by name and level. */
+  /** Finds a visible (DOM-rendered) AG-Grid row by name and level. */
   function findGridRow(name, level) {
     const n = normalize(name);
     for (const row of getGridRows(level)) {
       if (getGridRowName(row) === n) return row;
     }
     return null;
+  }
+
+  /**
+   * Scrolls the AG-Grid body viewport incrementally to find a row.
+   * AG-Grid virtual scrolling only renders rows in the visible area;
+   * this function scrolls through the entire list to expose all rows.
+   *
+   * Returns the matching row element, or null if not found.
+   */
+  async function scrollGridToFind(name, level, maxScrollSteps = 40) {
+    // Check already-rendered rows first (fast path)
+    let row = findGridRow(name, level);
+    if (row) return row;
+
+    // Locate the AG-Grid scrollable viewport inside the dialog
+    const viewport =
+      document.querySelector('[role="treegrid"] .ag-body-viewport') ||
+      document.querySelector('[role="treegrid"] .ag-center-cols-viewport') ||
+      document.querySelector('.ag-body-viewport');
+
+    if (!viewport) {
+      log('  AG-Grid viewport not found, cannot scroll', 'warn');
+      return null;
+    }
+
+    // Reset to top before scanning
+    viewport.scrollTop = 0;
+    await sleep(150);
+
+    const step = Math.max(80, Math.floor(viewport.clientHeight * 0.4));
+
+    for (let i = 1; i <= maxScrollSteps; i++) {
+      viewport.scrollTop = step * i;
+      await sleep(120); // Let virtual scroll render new rows
+
+      row = findGridRow(name, level);
+      if (row) return row;
+
+      // Stop if we've reached the bottom
+      if (viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 5) break;
+    }
+
+    // Scroll back to top and do one final check
+    viewport.scrollTop = 0;
+    await sleep(200);
+    return findGridRow(name, level);
   }
 
   /**
@@ -369,58 +411,56 @@
     const parts = destination.split('>').map(s => s.trim()).filter(Boolean);
     log(`  Navigating dialog to: ${parts.join(' > ')}`);
 
+    let target;
+
     if (parts.length === 1) {
-      // ── Single name: scan levels 0 → 1 → 2 ──────────────────────────
-      const n = normalize(parts[0]);
+      // ── Single name: scan level 0, then 1, then 2 ──────────────────────
+      target = await scrollGridToFind(parts[0], 0);
+      if (!target) target = await scrollGridToFind(parts[0], 1);
+      if (!target) target = await scrollGridToFind(parts[0], 2);
+      if (!target) throw new Error(`Move/Merge dialog: "${destination}" not found`);
 
-      // Check Level 0 first (always visible)
-      let target = findGridRow(parts[0], 0);
-      if (target) { await scrollIntoView(target); target.click(); }
-      else {
-        // Expand each Level-0 row and look in Level 1
-        let found = false;
-        for (const l0 of getGridRows(0)) {
-          await expandGridRow(l0);
-          target = findGridRow(parts[0], 1);
-          if (target) { await scrollIntoView(target); target.click(); found = true; break; }
-
-          // Expand each Level-1 row and look in Level 2
-          for (const l1 of getGridRows(1)) {
-            await expandGridRow(l1);
-            target = findGridRow(parts[0], 2);
-            if (target) { await scrollIntoView(target); target.click(); found = true; break; }
-          }
-          if (found) break;
-        }
-        if (!target) throw new Error(`Move/Merge dialog: "${destination}" not found`);
-      }
+      log(`  Found "${parts[0]}", clicking...`);
+      await scrollIntoView(target);
+      target.click();
 
     } else if (parts.length === 2) {
       // ── Category > Topic ─────────────────────────────────────────────
-      const l0 = await waitFor(() => findGridRow(parts[0], 0), CFG.waitTimeout).catch(() => null);
+      const l0 = await scrollGridToFind(parts[0], 0);
       if (!l0) throw new Error(`Move/Merge dialog: Category "${parts[0]}" not found`);
       log(`  Found Category "${parts[0]}", expanding...`);
+      await scrollIntoView(l0);
       await expandGridRow(l0);
 
-      const l1 = await waitFor(() => findGridRow(parts[1], 1), 5000).catch(() => null);
+      // Children should now be rendered near l0; scroll to find if needed
+      const l1 =
+        await waitFor(() => findGridRow(parts[1], 1), 3000).catch(() => null) ||
+        await scrollGridToFind(parts[1], 1);
       if (!l1) throw new Error(`Move/Merge dialog: Topic "${parts[1]}" not found under "${parts[0]}"`);
+
       log(`  Found Topic "${parts[1]}", clicking...`);
       await scrollIntoView(l1);
       l1.click();
 
     } else {
       // ── Category > Topic > Intent ─────────────────────────────────────
-      const l0 = await waitFor(() => findGridRow(parts[0], 0), CFG.waitTimeout).catch(() => null);
+      const l0 = await scrollGridToFind(parts[0], 0);
       if (!l0) throw new Error(`Move/Merge dialog: Category "${parts[0]}" not found`);
       log(`  Found Category "${parts[0]}", expanding...`);
+      await scrollIntoView(l0);
       await expandGridRow(l0);
 
-      const l1 = await waitFor(() => findGridRow(parts[1], 1), 5000).catch(() => null);
+      const l1 =
+        await waitFor(() => findGridRow(parts[1], 1), 3000).catch(() => null) ||
+        await scrollGridToFind(parts[1], 1);
       if (!l1) throw new Error(`Move/Merge dialog: Topic "${parts[1]}" not found`);
       log(`  Found Topic "${parts[1]}", expanding...`);
+      await scrollIntoView(l1);
       await expandGridRow(l1);
 
-      const l2 = await waitFor(() => findGridRow(parts[2], 2), 5000).catch(() => null);
+      const l2 =
+        await waitFor(() => findGridRow(parts[2], 2), 3000).catch(() => null) ||
+        await scrollGridToFind(parts[2], 2);
       if (!l2) throw new Error(`Move/Merge dialog: Intent "${parts[2]}" not found`);
       log(`  Found Intent "${parts[2]}", clicking...`);
       await scrollIntoView(l2);
