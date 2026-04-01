@@ -741,14 +741,14 @@ async function executeMoveMerge(targetLi, changePath) {
 
     // Fire a full suite of pointer and mouse events on the inner span and the button itself
     const innerSpan = actionBtn.querySelector('span');
-    const clickTarget = innerSpan || actionBtn;
+    const btnTarget = innerSpan || actionBtn;
 
-    clickTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-    clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    btnTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    btnTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     await sleep(50);
-    clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    clickTarget.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-    clickTarget.click();
+    btnTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    btnTarget.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    btnTarget.click();
 
     // Fallback native click on the button itself just in case the framework bound it there
     if (innerSpan) actionBtn.click();
