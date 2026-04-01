@@ -737,34 +737,44 @@ async function executeMoveMerge(targetLi, changePath) {
       await sleep(CFG.shortDelay);
     }
 
-    // 7. Wait for the Primary Action Button (Save / Next / Move / Merge) to become enabled
+    // 7. Wait for the Primary Action Button (Save / Next / Move / Merge) to become enabled.
+    // IMPORTANT: cxone-modal / PrimeNG dialogs often portal their footer to <body>, so
+    // the Save button may sit OUTSIDE the `modal` element reference.  Search document-wide.
     log('  Waiting for Save/Next button to become enabled...');
+
+    function findSaveBtn() {
+      // Specific selectors first (most reliable)
+      for (const sel of [
+        '.modal-footer-wrapper .save-btn',
+        '.modal-footer-wrapper .btn-primary',
+        '.p-dialog-footer .p-button-primary',
+        'button.save-btn',
+      ]) {
+        const el = document.querySelector(sel);
+        if (el) return el;
+      }
+      // Generic fallback: any visible non-cancel button in a dialog/modal footer
+      for (const b of document.querySelectorAll(
+        '.modal-footer-wrapper button, .p-dialog-footer button, cxone-modal button, move-to-modal button'
+      )) {
+        const text = b.textContent.trim().toLowerCase();
+        if (b.classList.contains('cancel-btn') || text === 'cancel' || text === 'close') continue;
+        if (b.classList.contains('save-btn') || b.classList.contains('btn-primary') ||
+            text.match(/^(save|merge|move|next|confirm|submit)$/i)) return b;
+      }
+      return null;
+    }
+
+    function isBtnDisabled(btn) {
+      return btn.disabled ||
+             btn.classList.contains('p-disabled') ||
+             btn.classList.contains('disabled') ||
+             btn.getAttribute('aria-disabled') === 'true' ||
+             btn.getAttribute('ng-reflect-disabled') === 'true';
+    }
+
     const actionBtn = await waitFor(
-      () => {
-        let btn = modal.querySelector('.modal-footer-wrapper .save-btn') ||
-                  modal.querySelector('.modal-footer-wrapper .btn-primary') ||
-                  modal.querySelector('.p-dialog-footer .p-button-primary');
-
-        if (!btn) {
-          const buttons = Array.from(modal.querySelectorAll('button'));
-          btn = buttons.find(b => {
-            const text = b.textContent.trim().toLowerCase();
-            const isCancel = b.classList.contains('cancel-btn') || text === 'cancel' || text === 'close';
-            if (isCancel) return false;
-            return b.classList.contains('save-btn') || b.classList.contains('btn-primary') ||
-                   text.match(/^(save|merge|move|next|confirm|submit)$/i);
-          });
-        }
-
-        if (!btn) return null;
-
-        // Only return the button once it is actually enabled
-        const isDisabled = btn.disabled ||
-                           btn.classList.contains('p-disabled') ||
-                           btn.classList.contains('disabled') ||
-                           btn.getAttribute('aria-disabled') === 'true';
-        return isDisabled ? null : btn;
-      },
+      () => { const b = findSaveBtn(); return (b && !isBtnDisabled(b)) ? b : null; },
       8000
     ).catch(() => null);
 
