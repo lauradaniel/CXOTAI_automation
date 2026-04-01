@@ -703,45 +703,55 @@ async function executeMoveMerge(targetLi, changePath) {
       await sleep(CFG.shortDelay);
     }
 
-    // 7. Hit the Primary Action Button (Save / Next / Move / Merge)
-    let actionBtn = modal.querySelector('.modal-footer-wrapper .save-btn, .modal-footer-wrapper .btn-primary, .p-dialog-footer .p-button-primary');
+    // 7. Wait for the Primary Action Button (Save / Next / Move / Merge) to become enabled
+    log('  Waiting for Save/Next button to become enabled...');
+    const actionBtn = await waitFor(
+      () => {
+        let btn = modal.querySelector('.modal-footer-wrapper .save-btn') ||
+                  modal.querySelector('.modal-footer-wrapper .btn-primary') ||
+                  modal.querySelector('.p-dialog-footer .p-button-primary');
 
-    if (!actionBtn) {
-        const buttons = Array.from(modal.querySelectorAll('button'));
-        actionBtn = buttons.find(btn => {
-            const text = btn.textContent.trim().toLowerCase();
-            const isCancel = btn.classList.contains('cancel-btn') || text === 'cancel' || text === 'close';
+        if (!btn) {
+          const buttons = Array.from(modal.querySelectorAll('button'));
+          btn = buttons.find(b => {
+            const text = b.textContent.trim().toLowerCase();
+            const isCancel = b.classList.contains('cancel-btn') || text === 'cancel' || text === 'close';
             if (isCancel) return false;
-            return btn.classList.contains('save-btn') || btn.classList.contains('btn-primary') || text.match(/^(save|merge|move|next|confirm|submit)$/i);
-        });
-    }
+            return b.classList.contains('save-btn') || b.classList.contains('btn-primary') ||
+                   text.match(/^(save|merge|move|next|confirm|submit)$/i);
+          });
+        }
 
-    if (!actionBtn) throw new Error('Primary action button (Save/Next) not found in the first popup');
-    
-    // Check disabled state via multiple common attributes
-    const isDisabled = actionBtn.disabled || actionBtn.classList.contains('p-disabled') || actionBtn.classList.contains('disabled') || actionBtn.getAttribute('aria-disabled') === 'true';
+        if (!btn) return null;
 
-    if (!isDisabled) {
-        actionBtn.scrollIntoView({ block: 'center' });
-        await sleep(100);
+        // Only return the button once it is actually enabled
+        const isDisabled = btn.disabled ||
+                           btn.classList.contains('p-disabled') ||
+                           btn.classList.contains('disabled') ||
+                           btn.getAttribute('aria-disabled') === 'true';
+        return isDisabled ? null : btn;
+      },
+      8000
+    ).catch(() => null);
 
-        // Fire a full suite of pointer and mouse events on the inner span and the button itself
-        const innerSpan = actionBtn.querySelector('span');
-        const clickTarget = innerSpan || actionBtn;
+    if (!actionBtn) throw new Error('Primary action button (Save/Next) not found or never became enabled after selecting the destination node.');
 
-        clickTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-        clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-        await sleep(50);
-        clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-        clickTarget.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-        clickTarget.click();
+    actionBtn.scrollIntoView({ block: 'center' });
+    await sleep(100);
 
-        // Fallback native click on the button itself just in case the framework bound it there
-        if (innerSpan) actionBtn.click();
-        
-    } else {
-        throw new Error(`The primary button ("${actionBtn.textContent.trim()}") is disabled. Node selection likely failed to register.`);
-    }
+    // Fire a full suite of pointer and mouse events on the inner span and the button itself
+    const innerSpan = actionBtn.querySelector('span');
+    const clickTarget = innerSpan || actionBtn;
+
+    clickTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await sleep(50);
+    clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    clickTarget.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    clickTarget.click();
+
+    // Fallback native click on the button itself just in case the framework bound it there
+    if (innerSpan) actionBtn.click();
     
     await sleep(CFG.dialogDelay);
   }
