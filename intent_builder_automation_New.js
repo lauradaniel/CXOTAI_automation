@@ -254,13 +254,32 @@
     }
   }
 
-  async function locateTarget(row) { 
+  async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
+    // Wait for the main tree to finish loading after a page load/soft-reload.
+    // Angular fetches tree data asynchronously; we must not search until items exist.
+    const treeReady = await waitFor(
+      () => document.querySelector('li[role="treeitem"]') ? true : null,
+      30000
+    ).catch(() => null);
+
+    if (!treeReady) {
+      // Diagnostic: show what's actually in the DOM so we can adjust selectors
+      const anyLi   = document.querySelectorAll('li').length;
+      const anyRole = document.querySelectorAll('[role]').length;
+      log(`Tree not ready after 30s — li count: ${anyLi}, [role] count: ${anyRole}. Check that the Intent Builder tree is visible.`, 'error');
+      return null;
+    }
+
     const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
-    if (!catItem) { log(`Category not found: "${category}"`, 'error'); return null; }
+    if (!catItem) {
+      const allItems = document.querySelectorAll('li[role="treeitem"]');
+      log(`Category not found: "${category}" — ${allItems.length} treeitem(s) visible. First: "${allItems[0]?.getAttribute('aria-label') || allItems[0]?.textContent?.trim()}"`, 'error');
+      return null;
+    }
     if (!topic) return catItem;
 
     await expandItem(catItem);
