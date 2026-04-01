@@ -765,46 +765,42 @@ async function executeMoveMerge(targetLi, changePath) {
     await sleep(50);
     cell.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true }));
     cell.click();
-    await sleep(CFG.shortDelay);
 
-    // Verify AG-Grid registered the selection; retry once if not
-    const isSelected = await waitFor(
-      () => row.getAttribute('aria-selected') === 'true' ? true : null,
-      2000
-    ).catch(() => null);
-
-    if (!isSelected) {
-      log('  Selection not confirmed, retrying click...', 'warn');
-      row.click();
-      await sleep(CFG.actionDelay);
-    }
+    // Give AG-Grid time to process the selection and enable the Save button.
+    // Do NOT retry with row.click() — on group rows that triggers expand/collapse.
+    await sleep(CFG.actionDelay);
 
     // 7. Wait for the Primary Action Button (Save / Next / Move / Merge) to become enabled.
-    // IMPORTANT: cxone-modal / PrimeNG dialogs often portal their footer to <body>, so
-    // the Save button may sit OUTSIDE the `modal` element reference.  Search document-wide.
+    // Angular CDK portals overlay content to <body> in DOM order — the LAST visible save
+    // button belongs to the most recently opened dialog (our Move/Merge modal).
     log('  Waiting for Save/Next button to become enabled...');
 
+    function isElVisible(el) {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.top >= 0 && r.bottom <= window.innerHeight + 100;
+    }
+
     function findSaveBtn() {
-      // Specific selectors first (most reliable)
+      // Try scoped footer wrappers first (most specific)
       for (const sel of [
         '.modal-footer-wrapper .save-btn',
         '.modal-footer-wrapper .btn-primary',
         '.p-dialog-footer .p-button-primary',
-        'button.save-btn',
       ]) {
         const el = document.querySelector(sel);
-        if (el) return el;
+        if (el && isElVisible(el)) return el;
       }
-      // Generic fallback: any visible non-cancel button in a dialog/modal footer
-      for (const b of document.querySelectorAll(
-        '.modal-footer-wrapper button, .p-dialog-footer button, cxone-modal button, move-to-modal button'
-      )) {
-        const text = b.textContent.trim().toLowerCase();
-        if (b.classList.contains('cancel-btn') || text === 'cancel' || text === 'close') continue;
-        if (b.classList.contains('save-btn') || b.classList.contains('btn-primary') ||
-            text.match(/^(save|merge|move|next|confirm|submit)$/i)) return b;
-      }
-      return null;
+      // Fall back: collect ALL visible save/primary buttons and return the LAST one.
+      // Angular CDK appends overlay panels to <body> in opening order, so the last
+      // visible button belongs to the topmost (most recently opened) dialog.
+      const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
+        if (!isElVisible(b)) return false;
+        const txt = b.textContent.trim().toLowerCase();
+        if (b.classList.contains('cancel-btn') || txt === 'cancel' || txt === 'close') return false;
+        return b.classList.contains('save-btn') || b.classList.contains('btn-primary') ||
+               txt.match(/^(save|merge|move|next|confirm|submit)$/i);
+      });
+      return candidates.length ? candidates[candidates.length - 1] : null;
     }
 
     function isBtnDisabled(btn) {
@@ -821,6 +817,7 @@ async function executeMoveMerge(targetLi, changePath) {
     ).catch(() => null);
 
     if (!actionBtn) throw new Error('Primary action button (Save/Next) not found or never became enabled after selecting the destination node.');
+    log(`  Clicking Save button: "${actionBtn.textContent.trim()}"`);
 
     actionBtn.scrollIntoView({ block: 'center' });
     await sleep(100);
