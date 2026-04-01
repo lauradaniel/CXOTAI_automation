@@ -165,36 +165,70 @@
 
   const normalize = s => (s || '').trim().toLowerCase();
 
- // --- 1. Get the exact name using the built-in accessibility label ---
+ // --- 1. Get the display name of a tree node ---
   function getItemName(li) {
-    // PrimeNG stamps the exact text into the aria-label
-    let name = li.getAttribute('aria-label');
-    if (name) return name;
-    
-    // Fallback just in case
-    const nameDiv = li.querySelector('.kanban-tree-node-name');
-    if (nameDiv) return nameDiv.textContent;
-    
+    // PrimeNG stamps the exact text into aria-label
+    const ariaLabel = li.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel.trim();
+
+    // Known class names used by this app
+    for (const sel of ['.kanban-tree-node-name', '.p-treenode-label', '[class*="node-name"]', '[class*="tree-label"]']) {
+      const el = li.querySelector(sel);
+      if (el) return el.textContent.trim();
+    }
+
+    // Last resort: text inside .p-treenode-content but strip child-list text
+    const content = li.querySelector('.p-treenode-content');
+    if (content) {
+      const clone = content.cloneNode(true);
+      clone.querySelectorAll('ul').forEach(u => u.remove());
+      const t = clone.textContent.trim();
+      if (t) return t;
+    }
+
     return '';
+  }
+
+  // --- 1b. Determine the nesting level of a tree node ---
+  function getItemLevel(li) {
+    // Prefer the explicit attribute when present
+    const ariaLevel = parseInt(li.getAttribute('aria-level'), 10);
+    if (!isNaN(ariaLevel) && ariaLevel > 0) return ariaLevel;
+
+    // Fall back to counting treeitem ancestors
+    let level = 1;
+    let el = li.parentElement;
+    while (el) {
+      if (el.matches('li[role="treeitem"]')) level++;
+      el = el.parentElement;
+    }
+    return level;
   }
 
   // --- 2. Find the item using robust string matching ---
   function findItem(name, level, parentLi = null) {
     const cleanString = (str) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
     const targetName = cleanString(name);
-    
-    let scope = parentLi ? parentLi : document;
 
-    // Look for PrimeNG tree items at the correct depth
-    const elements = scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`);
-    
+    const scope = parentLi || document;
+
+    // Try the fast aria-level selector first
+    let elements = Array.from(scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`));
+
+    // If nothing found with aria-level (e.g. fresh page load where attribute is absent),
+    // fall back to all treeitems and filter by computed depth
+    if (elements.length === 0) {
+      elements = Array.from(scope.querySelectorAll('li[role="treeitem"]'))
+                      .filter(li => getItemLevel(li) === level);
+    }
+
     for (const li of elements) {
       const rawName = getItemName(li);
       if (rawName) {
-          const currentName = cleanString(rawName);
-          if (currentName === targetName || currentName.startsWith(targetName)) {
-              return li;
-          }
+        const currentName = cleanString(rawName);
+        if (currentName === targetName || currentName.startsWith(targetName)) {
+          return li;
+        }
       }
     }
     return null;
