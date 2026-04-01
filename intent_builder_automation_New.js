@@ -199,7 +199,7 @@
     let level = 1;
     let el = li.parentElement;
     while (el) {
-      if (el.matches('li[role="treeitem"]')) level++;
+      if (el.matches('[role="treeitem"]')) level++;
       el = el.parentElement;
     }
     return level;
@@ -213,13 +213,13 @@
     const scope = parentLi || document;
 
     // Try the fast aria-level selector first
-    let elements = Array.from(scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`));
+    let elements = Array.from(scope.querySelectorAll(`[role="treeitem"][aria-level="${level}"]`));
 
     // If nothing found with aria-level (e.g. fresh page load where attribute is absent),
     // fall back to all treeitems and filter by computed depth
     if (elements.length === 0) {
-      elements = Array.from(scope.querySelectorAll('li[role="treeitem"]'))
-                      .filter(li => getItemLevel(li) === level);
+      elements = Array.from(scope.querySelectorAll('[role="treeitem"]'))
+                      .filter(el => getItemLevel(el) === level);
     }
 
     for (const li of elements) {
@@ -262,7 +262,7 @@
     // Wait for the main tree to finish loading after a page load/soft-reload.
     // Angular fetches tree data asynchronously; we must not search until items exist.
     const treeReady = await waitFor(
-      () => document.querySelector('li[role="treeitem"]') ? true : null,
+      () => document.querySelector('[role="treeitem"]') ? true : null,
       30000
     ).catch(() => null);
 
@@ -276,7 +276,7 @@
 
     const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
     if (!catItem) {
-      const allItems = document.querySelectorAll('li[role="treeitem"]');
+      const allItems = document.querySelectorAll('[role="treeitem"]');
       log(`Category not found: "${category}" — ${allItems.length} treeitem(s) visible. First: "${allItems[0]?.getAttribute('aria-label') || allItems[0]?.textContent?.trim()}"`, 'error');
       return null;
     }
