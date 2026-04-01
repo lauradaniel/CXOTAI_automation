@@ -559,17 +559,28 @@ async function performMerge(targetLi, change, newName) {
     // 1. Execute the first step (finding the branch and clicking Save)
     await executeMoveMerge(targetLi, change);
 
-    // 2. Wait for the second Merge confirmation popup
+    // 2. Wait for the Move/Merge tree dialog to fully close before looking for the next one.
+    //    The first dialog uses AG-Grid ([role="treegrid"]) — wait until it's gone.
+    log('  Waiting for tree dialog to close...');
+    await waitFor(
+      () => {
+        const grid = document.querySelector('[role="treegrid"], .ag-root-wrapper');
+        return (!grid || grid.offsetParent === null) ? true : null;
+      },
+      CFG.waitTimeout
+    ).catch(() => null);
     await sleep(CFG.dialogDelay);
-    
+
+    // 3. Wait for the second Merge confirmation popup.
+    //    Must have a text input AND must NOT contain an AG-Grid tree (that would be the first dialog still closing).
     const secondModal = await waitFor(() => {
-        // Look for any dialog that has a text input and is NOT the tree menu
         const modals = Array.from(document.querySelectorAll('cxone-modal, merge-modal, .p-dialog, [role="dialog"]'));
         return modals.find(m => {
-            const hasInput = m.querySelector('input:not([type="hidden"]), textarea');
-            const isVisible = m.offsetParent !== null || m.style.display !== 'none';
-            const isNotTreeModal = !m.querySelector('.p-treenode, [role="treeitem"]'); // Ensure we moved past the first modal
-            return hasInput && isVisible && isNotTreeModal;
+            const hasInput    = m.querySelector('input:not([type="hidden"]), textarea');
+            const isVisible   = m.offsetParent !== null || m.style.display !== 'none';
+            const hasNoGrid   = !m.querySelector('[role="treegrid"], .ag-root-wrapper, .ag-root');
+            const hasNoTree   = !m.querySelector('.p-treenode, [role="treeitem"]');
+            return hasInput && isVisible && hasNoGrid && hasNoTree;
         });
     }, CFG.waitTimeout);
 
