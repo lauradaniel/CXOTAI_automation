@@ -732,20 +732,32 @@ async function executeMoveMerge(targetLi, changePath) {
       throw new Error(`Destination branch "${targetNodeName}" not found in the tree after exhaustive scrolling.`);
     }
 
-    // 6. Select the target node
-    const row = nodeSpan.closest('[role="row"], .ag-row, .p-treenode-content');
-    if (row) {
-      row.scrollIntoView({ behavior: 'instant', block: 'center' });
-      await sleep(CFG.shortDelay);
+    // 6. Select the target node.
+    // IMPORTANT: click only the .ag-cell, never the span directly — clicking the
+    // text span on a group row triggers AG-Grid's expand/collapse, not row selection.
+    const row = nodeSpan.closest('[role="row"]') || nodeSpan.closest('.ag-row');
+    if (!row) throw new Error('Could not resolve AG-Grid row for the target node');
 
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await sleep(CFG.shortDelay);
+
+    const cell = nodeSpan.closest('.ag-cell') || row;
+    cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await sleep(50);
+    cell.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true }));
+    cell.click();
+    await sleep(CFG.shortDelay);
+
+    // Verify AG-Grid registered the selection; retry once if not
+    const isSelected = await waitFor(
+      () => row.getAttribute('aria-selected') === 'true' ? true : null,
+      2000
+    ).catch(() => null);
+
+    if (!isSelected) {
+      log('  Selection not confirmed, retrying click...', 'warn');
       row.click();
-      await sleep(CFG.shortDelay);
-      
-      const cell = nodeSpan.closest('.ag-cell, .p-treenode-label');
-      if (cell) cell.click();
-      
-      nodeSpan.click();
-      await sleep(CFG.shortDelay);
+      await sleep(CFG.actionDelay);
     }
 
     // 7. Wait for the Primary Action Button (Save / Next / Move / Merge) to become enabled.
