@@ -165,16 +165,16 @@
 
   const normalize = s => (s || '').trim().toLowerCase();
 
- // --- 1. Get the exact name using the built-in accessibility label ---
+  // --- 1. Get the exact name using the built-in accessibility label ---
   function getItemName(li) {
     // PrimeNG stamps the exact text into the aria-label
     let name = li.getAttribute('aria-label');
     if (name) return name;
-    
+
     // Fallback just in case
     const nameDiv = li.querySelector('.kanban-tree-node-name');
     if (nameDiv) return nameDiv.textContent;
-    
+
     return '';
   }
 
@@ -182,12 +182,12 @@
   function findItem(name, level, parentLi = null) {
     const cleanString = (str) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
     const targetName = cleanString(name);
-    
+
     let scope = parentLi ? parentLi : document;
 
     // Look for PrimeNG tree items at the correct depth
     const elements = scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`);
-    
+
     for (const li of elements) {
       const rawName = getItemName(li);
       if (rawName) {
@@ -220,7 +220,7 @@
     }
   }
 
-  async function locateTarget(row) { 
+  async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
@@ -293,20 +293,6 @@
 
   // ─────────────────────────────────────────────
   // MOVE / MERGE — AG-GRID POPUP NAVIGATION
-  //
-  // The Move/Merge dialog uses AG-Grid (not p-tree).
-  // Rows: div[role="row"] with class ag-row-level-0 / ag-row-level-1 / ag-row-level-2
-  // Name: span[data-aid="ellipsis-sliced-text"] inside each row
-  // Expand: click .ag-group-contracted span inside the row
-  // Save:   button.save-btn  (disabled until a row is clicked)
-  //
-  // AG-Grid uses virtual scrolling: rows outside the viewport are NOT in the DOM.
-  // scrollGridToFind() handles this by scrolling the AG-Grid body viewport.
-  //
-  // "Required Change" format:
-  //   "Category"                    — move/merge into a category
-  //   "Category > Topic"            — move/merge into a topic
-  //   "Category > Topic > Intent"   — move/merge into an intent
   // ─────────────────────────────────────────────
 
   /** Returns the display name of an AG-Grid row. */
@@ -354,30 +340,17 @@
     return null;
   }
 
-  /**
-   * Scrolls the AG-Grid body viewport incrementally to find a row.
-   * AG-Grid virtual scrolling only renders rows in the visible area;
-   * this function scrolls through the entire list to expose all rows.
-   *
-   * Returns the matching row element, or null if not found.
-   */
   async function scrollGridToFind(name, level, maxScrollSteps = 40) {
-    // Check already-rendered rows first (fast path)
     let row = findGridRow(name, level);
     if (row) return row;
 
-    // Locate the AG-Grid scrollable viewport inside the dialog
     const viewport =
       document.querySelector('[role="treegrid"] .ag-body-viewport') ||
       document.querySelector('[role="treegrid"] .ag-center-cols-viewport') ||
       document.querySelector('.ag-body-viewport');
 
-    if (!viewport) {
-      log('  AG-Grid viewport not found, cannot scroll', 'warn');
-      return null;
-    }
+    if (!viewport) return null;
 
-    // Reset to top before scanning
     viewport.scrollTop = 0;
     await sleep(150);
 
@@ -385,109 +358,169 @@
 
     for (let i = 1; i <= maxScrollSteps; i++) {
       viewport.scrollTop = step * i;
-      await sleep(120); // Let virtual scroll render new rows
-
+      await sleep(120);
       row = findGridRow(name, level);
       if (row) return row;
-
-      // Stop if we've reached the bottom
       if (viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 5) break;
     }
 
-    // Scroll back to top and do one final check
     viewport.scrollTop = 0;
     await sleep(200);
     return findGridRow(name, level);
   }
 
   /**
-   * Navigates the AG-Grid in the Move/Merge dialog and clicks the destination row.
+   * Opens the Move/Merge popup, navigates to the destination in the AG-Grid tree,
+   * and clicks Save. Used by both performMove and performMerge.
    *
    * destination formats:
    *   "Category"                   → click the Level-0 category row
    *   "Category > Topic"           → expand category, click Level-1 topic row
    *   "Category > Topic > Intent"  → expand both, click Level-2 intent row
    */
-  async function selectDestination(destination) {
-    await sleep(CFG.dialogDelay);
+  async function executeMoveMerge(targetLi, changePath) {
+    // 1. Open the More Actions menu for the selected item
+    await hoverOver(targetLi);
+    const moreBtn = targetLi.querySelector('.kanban-more-button, .actions-renderer-container .more-icon-container, use[href="#icon-more"]');
+    if (!moreBtn) throw new Error('More Actions button not found on target item');
 
-    // Wait for the AG-Grid treegrid to appear inside the modal
-    await waitFor(
-      () => document.querySelector('[role="treegrid"]'),
-      CFG.waitTimeout
+    const clickTarget = moreBtn.closest('button') || moreBtn.closest('.more-icon-container') || moreBtn;
+    clickTarget.click();
+    await sleep(CFG.actionDelay);
+
+    // 2. Select Move/Merge option in the dropdown
+    const allTextElements = Array.from(document.querySelectorAll('*')).filter(
+      el => el.children.length === 0 && el.textContent.trim() === 'Move/Merge'
     );
-    await sleep(CFG.shortDelay);
+    const moveMergeOpt = allTextElements.find(el => el.offsetWidth > 0 && el.offsetHeight > 0);
 
-    const parts = destination.split('>').map(s => s.trim()).filter(Boolean);
-    log(`  Navigating dialog to: ${parts.join(' > ')}`);
-
-    let target;
-
-    if (parts.length === 1) {
-      // ── Single name: scan level 0, then 1, then 2 ──────────────────────
-      target = await scrollGridToFind(parts[0], 0);
-      if (!target) target = await scrollGridToFind(parts[0], 1);
-      if (!target) target = await scrollGridToFind(parts[0], 2);
-      if (!target) throw new Error(`Move/Merge dialog: "${destination}" not found`);
-
-      log(`  Found "${parts[0]}", clicking...`);
-      await scrollIntoView(target);
-      target.click();
-
-    } else if (parts.length === 2) {
-      // ── Category > Topic ─────────────────────────────────────────────
-      const l0 = await scrollGridToFind(parts[0], 0);
-      if (!l0) throw new Error(`Move/Merge dialog: Category "${parts[0]}" not found`);
-      log(`  Found Category "${parts[0]}", expanding...`);
-      await scrollIntoView(l0);
-      await expandGridRow(l0);
-
-      // Children should now be rendered near l0; scroll to find if needed
-      const l1 =
-        await waitFor(() => findGridRow(parts[1], 1), 3000).catch(() => null) ||
-        await scrollGridToFind(parts[1], 1);
-      if (!l1) throw new Error(`Move/Merge dialog: Topic "${parts[1]}" not found under "${parts[0]}"`);
-
-      log(`  Found Topic "${parts[1]}", clicking...`);
-      await scrollIntoView(l1);
-      l1.click();
-
+    if (moveMergeOpt) {
+      moveMergeOpt.click();
+      if (document.activeElement) document.activeElement.blur();
     } else {
-      // ── Category > Topic > Intent ─────────────────────────────────────
-      const l0 = await scrollGridToFind(parts[0], 0);
-      if (!l0) throw new Error(`Move/Merge dialog: Category "${parts[0]}" not found`);
-      log(`  Found Category "${parts[0]}", expanding...`);
-      await scrollIntoView(l0);
-      await expandGridRow(l0);
-
-      const l1 =
-        await waitFor(() => findGridRow(parts[1], 1), 3000).catch(() => null) ||
-        await scrollGridToFind(parts[1], 1);
-      if (!l1) throw new Error(`Move/Merge dialog: Topic "${parts[1]}" not found`);
-      log(`  Found Topic "${parts[1]}", expanding...`);
-      await scrollIntoView(l1);
-      await expandGridRow(l1);
-
-      const l2 =
-        await waitFor(() => findGridRow(parts[2], 2), 3000).catch(() => null) ||
-        await scrollGridToFind(parts[2], 2);
-      if (!l2) throw new Error(`Move/Merge dialog: Intent "${parts[2]}" not found`);
-      log(`  Found Intent "${parts[2]}", clicking...`);
-      await scrollIntoView(l2);
-      l2.click();
+      throw new Error('Move/Merge option not found in the dropdown menu');
     }
 
-    await sleep(CFG.shortDelay);
+    await sleep(CFG.dialogDelay);
 
-    // Save button becomes enabled once a row is selected
-    const saveBtn = await waitFor(
-      () => {
-        const btn = document.querySelector('button.save-btn');
-        return (btn && !btn.disabled) ? btn : null;
-      },
-      5000
+    // 3. Wait for the AG-Grid/Tree popup modal
+    const modal = await waitFor(
+      () => document.querySelector('move-to-modal, cxone-modal, .p-dialog'),
+      CFG.waitTimeout
     );
+    if (!modal) throw new Error('Move/Merge popup did not open');
+
+    // 4. Parse the target destination
+    const parts = changePath.split('>').map(s => s.trim());
+    const targetNodeName = parts[parts.length - 1];
+
+    // 5. Helper: find the name span for a node
+    const findTargetSpan = (name) => {
+      let spans = Array.from(modal.querySelectorAll(
+        'span[data-aid="ellipsis-sliced-text"], .kanban-tree-node-name, .p-treenode-label'
+      ));
+      let match = spans.find(el => el.textContent.trim().toLowerCase() === name.toLowerCase());
+      if (!match) {
+        match = spans.find(el =>
+          el.textContent.trim().toLowerCase().includes(name.toLowerCase().substring(0, 15))
+        );
+      }
+      return match;
+    };
+
+    // 6. Navigate the AG-Grid tree: expand rows until target is found
+    let nodeSpan = null;
+    let hitEnd = false;
+    let attempts = 0;
+    const maxAttempts = 200;
+
+    let viewport =
+      modal.querySelector('.ag-body-viewport, .ag-center-cols-viewport, .p-dialog-content') ||
+      modal;
+    viewport.scrollTop = 0;
+    await sleep(300);
+
+    while (!nodeSpan && !hitEnd && attempts < maxAttempts) {
+      attempts++;
+
+      nodeSpan = findTargetSpan(targetNodeName);
+      if (nodeSpan) break;
+
+      let expanders = Array.from(modal.querySelectorAll(
+        '.ag-group-contracted:not(.ag-hidden), .p-tree-toggler[aria-expanded="false"]'
+      ));
+      if (expanders.length > 0) {
+        for (let expander of expanders) {
+          expander.click();
+          await sleep(150);
+        }
+        await sleep(400);
+        continue;
+      }
+
+      let beforeScroll = viewport.scrollTop;
+      let scrollAmount = viewport.clientHeight > 0 ? (viewport.clientHeight - 40) : 300;
+      viewport.scrollTop += scrollAmount;
+      await sleep(400);
+
+      if (viewport.scrollTop > beforeScroll) continue;
+
+      let nextBtn = modal.querySelector('.ag-paging-button[aria-label="Next Page"]');
+      if (
+        nextBtn &&
+        !nextBtn.classList.contains('ag-disabled') &&
+        nextBtn.getAttribute('aria-disabled') !== 'true' &&
+        !nextBtn.disabled
+      ) {
+        nextBtn.click();
+        await sleep(1500);
+        viewport.scrollTop = 0;
+        continue;
+      }
+
+      hitEnd = true;
+    }
+
+    if (!nodeSpan) {
+      throw new Error(
+        `Destination "${targetNodeName}" not found in the Move/Merge tree after exhaustive search.`
+      );
+    }
+
+    // 7. Select the target row with a SINGLE click.
+    //    Multiple clicks (row + cell + span) can toggle the selection off in AG-Grid.
+    const row = nodeSpan.closest('[role="row"], .ag-row, .p-treenode-content');
+    if (row) {
+      row.scrollIntoView({ behavior: 'instant', block: 'center' });
+      await sleep(200);
+      row.click();
+    } else {
+      // Fallback: click the span itself
+      nodeSpan.scrollIntoView({ behavior: 'instant', block: 'center' });
+      await sleep(200);
+      nodeSpan.click();
+    }
+
+    // 8. Wait for the Save button to become enabled (Angular removes `disabled`
+    //    attribute only after processing the row-selection change event).
+    log('  Waiting for Save button to become enabled...');
+    const saveBtn = await waitFor(() => {
+      const btn =
+        modal.querySelector('button.save-btn') ||
+        modal.querySelector('.modal-footer-wrapper button:not(.cancel-btn)');
+      return (btn && !btn.disabled) ? btn : null;
+    }, 6000).catch(() => null);
+
+    if (!saveBtn) {
+      throw new Error(
+        'Save button did not become enabled. Row selection may not have registered — try again.'
+      );
+    }
+
+    saveBtn.scrollIntoView({ block: 'center' });
+    await sleep(150);
     saveBtn.click();
+    log('  Save clicked.');
     await sleep(CFG.dialogDelay);
   }
 
@@ -517,235 +550,78 @@
     log('  Removed', 'success');
   }
 
-async function performMove(targetLi, change) {
+  async function performMove(targetLi, change) {
     await executeMoveMerge(targetLi, change);
+    log(`  Moved → "${change}"`, 'success');
   }
 
-async function performMerge(targetLi, change, newName) {
-    // 1. Execute the first step (finding the branch and clicking Save)
+  async function performMerge(targetLi, change, newName) {
+    // Step 1: open popup, navigate to destination, click Save
     await executeMoveMerge(targetLi, change);
 
-    // 2. Wait for the second Merge confirmation popup
+    // Step 2: wait for the second Merge confirmation/rename popup
     await sleep(CFG.dialogDelay);
-    
+
     const secondModal = await waitFor(() => {
-        // Look for any dialog that has a text input and is NOT the tree menu
-        const modals = Array.from(document.querySelectorAll('cxone-modal, merge-modal, .p-dialog, [role="dialog"]'));
-        return modals.find(m => {
-            const hasInput = m.querySelector('input:not([type="hidden"]), textarea');
-            const isVisible = m.offsetParent !== null || m.style.display !== 'none';
-            const isNotTreeModal = !m.querySelector('.p-treenode, [role="treeitem"]'); // Ensure we moved past the first modal
-            return hasInput && isVisible && isNotTreeModal;
-        });
-    }, CFG.waitTimeout);
+      const modals = Array.from(document.querySelectorAll(
+        'cxone-modal, merge-modal, .p-dialog, [role="dialog"]'
+      ));
+      return modals.find(m => {
+        const hasInput = m.querySelector('input:not([type="hidden"]), textarea');
+        const isVisible = m.offsetParent !== null || m.style.display !== 'none';
+        const isNotTreeModal = !m.querySelector('.p-treenode, [role="treeitem"]');
+        return hasInput && isVisible && isNotTreeModal;
+      });
+    }, CFG.waitTimeout).catch(() => null);
 
-    if (!secondModal) throw new Error('Second Merge popup (for renaming) did not open or is unrecognizable');
-
-    // 3. Enter the New Name
-    if (newName) {
-        const nameInput = secondModal.querySelector('textarea, input[type="text"], input:not([type="hidden"])');
-        if (!nameInput) throw new Error('Could not find text area for New Name in the second Merge popup');
-
-        nameInput.focus();
-        nameInput.value = '';
-        nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await sleep(200);
-
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set || 
-                                       Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-        
-        if (nativeInputValueSetter) {
-            nativeInputValueSetter.call(nameInput, newName);
-        } else {
-            nameInput.value = newName;
-        }
-
-        nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-        nameInput.dispatchEvent(new Event('change', { bubbles: true }));
-        nameInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
-        
-        await sleep(CFG.shortDelay);
+    if (!secondModal) {
+      throw new Error('Second Merge popup (rename step) did not open or is unrecognizable');
     }
 
-    // 4. Click the Final Merge/Confirm button
+    // Step 3: fill in the new merged intent name
+    if (newName) {
+      const nameInput = secondModal.querySelector(
+        'textarea, input[type="text"], input:not([type="hidden"])'
+      );
+      if (!nameInput) throw new Error('Text field not found in the second Merge popup');
+
+      nameInput.focus();
+      const nativeSetter =
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set ||
+        Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+
+      if (nativeSetter) {
+        nativeSetter.call(nameInput, newName);
+      } else {
+        nameInput.value = newName;
+      }
+      nameInput.dispatchEvent(new Event('input',  { bubbles: true }));
+      nameInput.dispatchEvent(new Event('change', { bubbles: true }));
+      await sleep(CFG.shortDelay);
+    }
+
+    // Step 4: click the final Merge/Confirm button
     let mergeBtn = Array.from(secondModal.querySelectorAll('button')).find(btn => {
-        const text = btn.textContent.trim().toLowerCase();
-        return text.match(/^(merge|save|confirm|submit|yes)$/i) && !btn.classList.contains('cancel-btn');
+      const text = btn.textContent.trim().toLowerCase();
+      return text.match(/^(merge|save|confirm|submit|yes)$/i) &&
+             !btn.classList.contains('cancel-btn') &&
+             !btn.disabled;
     });
 
     if (!mergeBtn) {
-        const footerBtns = Array.from(secondModal.querySelectorAll('.modal-footer-wrapper button, .p-dialog-footer button'));
-        if (footerBtns.length > 0) mergeBtn = footerBtns[footerBtns.length - 1];
+      const footerBtns = Array.from(
+        secondModal.querySelectorAll('.modal-footer-wrapper button, .p-dialog-footer button')
+      );
+      mergeBtn = footerBtns.find(b => !b.classList.contains('cancel-btn') && !b.disabled);
     }
 
-    if (!mergeBtn) throw new Error('Confirmation button not found in the second popup');
+    if (!mergeBtn) throw new Error('Confirm button not found in the second Merge popup');
 
-    if (!mergeBtn.disabled && !mergeBtn.classList.contains('p-disabled') && mergeBtn.getAttribute('aria-disabled') !== 'true') {
-        mergeBtn.focus();
-        mergeBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-        mergeBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-        mergeBtn.click();
-    } else {
-        throw new Error('Merge button in second popup is disabled.');
-    }
-
+    mergeBtn.click();
     await sleep(CFG.dialogDelay);
+    log(`  Merged → "${change}"`, 'success');
   }
 
-async function executeMoveMerge(targetLi, changePath) {
-    // 1. Open the More Actions menu for the selected item
-    await hoverOver(targetLi);
-    const moreBtn = targetLi.querySelector('.kanban-more-button, .actions-renderer-container .more-icon-container, use[href="#icon-more"]');
-    if (!moreBtn) throw new Error('More Actions button not found on target item');
-    
-    const clickTarget = moreBtn.closest('button') || moreBtn.closest('.more-icon-container') || moreBtn;
-    clickTarget.click();
-    await sleep(CFG.actionDelay);
-
-    // 2. Select Move/Merge option in the dropdown
-    const allTextElements = Array.from(document.querySelectorAll('*')).filter(el => el.children.length === 0 && el.textContent.trim() === 'Move/Merge');
-    const moveMergeOpt = allTextElements.find(el => el.offsetWidth > 0 && el.offsetHeight > 0);
-    
-    if (moveMergeOpt) {
-        moveMergeOpt.click();
-        if (document.activeElement) document.activeElement.blur(); // Clears accessibility warning
-    } else {
-        throw new Error('Move/Merge option not found in the dropdown menu');
-    }
-    
-    await sleep(CFG.dialogDelay);
-
-    // 3. Wait for the AG-Grid/Tree popup modal
-    const modal = await waitFor(() => document.querySelector('move-to-modal, cxone-modal, .p-dialog'), CFG.waitTimeout);
-    if (!modal) throw new Error('Move/Merge popup did not open');
-
-    // 4. Parse the target destination from CSV
-    const parts = changePath.split('>').map(s => s.trim());
-    const targetNodeName = parts[parts.length - 1];
-
-    // Helper to find the specific text span in the grid
-    const findTargetSpan = (name) => {
-        let spans = Array.from(modal.querySelectorAll('span[data-aid="ellipsis-sliced-text"], .kanban-tree-node-name, .p-treenode-label'));
-        let match = spans.find(el => el.textContent.trim().toLowerCase() === name.toLowerCase());
-        if (!match) {
-            match = spans.find(el => el.textContent.trim().toLowerCase().includes(name.toLowerCase().substring(0, 15)));
-        }
-        return match;
-    };
-
-    // 5. Navigate the AG-Grid tree by scanning, expanding, scrolling, and paginating
-    let nodeSpan = null;
-    let hitEnd = false;
-    let attempts = 0;
-    const maxAttempts = 200;
-
-    let viewport = modal.querySelector('.ag-body-viewport, .ag-center-cols-viewport, .p-dialog-content') || modal;
-    viewport.scrollTop = 0; 
-    await sleep(300);
-
-    while (!nodeSpan && !hitEnd && attempts < maxAttempts) {
-        attempts++;
-
-        nodeSpan = findTargetSpan(targetNodeName);
-        if (nodeSpan) break;
-
-        let expanders = Array.from(modal.querySelectorAll('.ag-group-contracted:not(.ag-hidden), .p-tree-toggler[aria-expanded="false"]'));
-        if (expanders.length > 0) {
-            for (let expander of expanders) {
-                expander.click();
-                await sleep(150);
-            }
-            await sleep(400); 
-            continue; 
-        }
-
-        let beforeScroll = viewport.scrollTop;
-        let scrollAmount = viewport.clientHeight > 0 ? (viewport.clientHeight - 40) : 300; 
-        viewport.scrollTop += scrollAmount;
-        await sleep(400); 
-
-        if (viewport.scrollTop > beforeScroll) {
-            continue;
-        }
-
-        let nextBtn = modal.querySelector('.ag-paging-button[aria-label="Next Page"]');
-        if (nextBtn && 
-            !nextBtn.classList.contains('ag-disabled') && 
-            nextBtn.getAttribute('aria-disabled') !== 'true' &&
-            !nextBtn.disabled) {
-            
-            nextBtn.click();
-            await sleep(1500); 
-            viewport.scrollTop = 0; 
-            continue;
-        }
-
-        hitEnd = true;
-    }
-
-    if (!nodeSpan) {
-      throw new Error(`Destination branch "${targetNodeName}" not found in the tree after exhaustive scrolling.`);
-    }
-
-    // 6. Select the target node
-    const row = nodeSpan.closest('[role="row"], .ag-row, .p-treenode-content');
-    if (row) {
-      row.scrollIntoView({ behavior: 'instant', block: 'center' });
-      await sleep(CFG.shortDelay);
-
-      row.click();
-      await sleep(CFG.shortDelay);
-      
-      const cell = nodeSpan.closest('.ag-cell, .p-treenode-label');
-      if (cell) cell.click();
-      
-      nodeSpan.click();
-      await sleep(CFG.shortDelay);
-    }
-
-    // 7. Hit the Primary Action Button (Save / Next / Move / Merge)
-    let actionBtn = modal.querySelector('.modal-footer-wrapper .save-btn, .modal-footer-wrapper .btn-primary, .p-dialog-footer .p-button-primary');
-
-    if (!actionBtn) {
-        const buttons = Array.from(modal.querySelectorAll('button'));
-        actionBtn = buttons.find(btn => {
-            const text = btn.textContent.trim().toLowerCase();
-            const isCancel = btn.classList.contains('cancel-btn') || text === 'cancel' || text === 'close';
-            if (isCancel) return false;
-            return btn.classList.contains('save-btn') || btn.classList.contains('btn-primary') || text.match(/^(save|merge|move|next|confirm|submit)$/i);
-        });
-    }
-
-    if (!actionBtn) throw new Error('Primary action button (Save/Next) not found in the first popup');
-    
-    // Check disabled state via multiple common attributes
-    const isDisabled = actionBtn.disabled || actionBtn.classList.contains('p-disabled') || actionBtn.classList.contains('disabled') || actionBtn.getAttribute('aria-disabled') === 'true';
-
-    if (!isDisabled) {
-        actionBtn.scrollIntoView({ block: 'center' });
-        await sleep(100);
-
-        // Fire a full suite of pointer and mouse events on the inner span and the button itself
-        const innerSpan = actionBtn.querySelector('span');
-        const clickTarget = innerSpan || actionBtn;
-
-        clickTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-        clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-        await sleep(50);
-        clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-        clickTarget.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-        clickTarget.click();
-
-        // Fallback native click on the button itself just in case the framework bound it there
-        if (innerSpan) actionBtn.click();
-        
-    } else {
-        throw new Error(`The primary button ("${actionBtn.textContent.trim()}") is disabled. Node selection likely failed to register.`);
-    }
-    
-    await sleep(CFG.dialogDelay);
-  }
-  
 
   // ─────────────────────────────────────────────
   // MAIN RUNNER
@@ -767,7 +643,8 @@ async function executeMoveMerge(targetLi, changePath) {
     for (let i = 0; i < rows.length; i++) {
       const row    = rows[i];
       const rowNum = i + 2;
-    // Helper to safely extract column values ignoring hidden characters/spaces from Excel
+
+      // Helper to safely extract column values — ignores hidden chars/spaces from Excel
       const getCol = (colName) => {
         for (let key in row) {
           let cleanKey = key.replace(/[^a-zA-Z0-9 ]/g, '').trim().toLowerCase();
@@ -792,29 +669,28 @@ async function executeMoveMerge(targetLi, changePath) {
         const target = await locateTarget(row);
         if (!target) { errors++; continue; }
 
-        // Extract values from the newly named columns
-        const renameTarget = getCol('updated intent name'); // Catches 'Updated Intent Name (L3)'
-        const moveTarget   = getCol('move to topic');       // Catches 'Move to Topic (L2)'
-        const mergeTarget  = getCol('merge to intent');     // Catches 'Merge to Intent (L3)'
+        const renameTarget = getCol('updated intent name');
+        const moveTarget   = getCol('move to topic');
+        const mergeTarget  = getCol('merge to intent');
 
         switch (action.toLowerCase()) {
           case 'rename':
-            if (!renameTarget) throw new Error('Column "Updated Intent Name (L3)" is empty');
+            if (!renameTarget) throw new Error('Column "Updated Intent Name" is empty');
             await performRename(target, renameTarget); break;
-            
+
           case 'deactivate':
-          case 'remove': // Kept as a fallback just in case old files are used
+          case 'remove':
             await performRemove(target); break;
-            
+
           case 'move':
-            if (!moveTarget) throw new Error('Column "Move to Topic (L2)" is empty');
+            if (!moveTarget) throw new Error('Column "Move to Topic" is empty');
             await performMove(target, moveTarget); break;
-            
+
           case 'merge':
-            if (!mergeTarget) throw new Error('Column "Merge to Intent (L3)" is empty');
-            if (!renameTarget) log(`Row ${rowNum}: Warning — Could not find "Updated Intent Name (L3)" for the rename step.`, 'warn');
+            if (!mergeTarget) throw new Error('Column "Merge to Intent" is empty');
+            if (!renameTarget) log(`Row ${rowNum}: Warning — "Updated Intent Name" is empty for merge rename step.`, 'warn');
             await performMerge(target, mergeTarget, renameTarget); break;
-            
+
           default:
             log(`Row ${rowNum}: Unknown action "${action}" — skipping`, 'warn');
             skipped++; continue;
