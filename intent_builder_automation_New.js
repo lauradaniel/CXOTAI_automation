@@ -221,9 +221,16 @@
     }
 
     // Strategy 3: tree rendered without role="treeitem" (e.g. this app's kanban tree).
-    // Find by .kanban-tree-node-name text, then walk up to the structural container.
+    // Find by any known node-label selector, then walk up to the structural container.
     if (elements.length === 0) {
-      const nameEls = Array.from(scope.querySelectorAll('.kanban-tree-node-name, .p-treenode-label'));
+      const nameEls = Array.from(scope.querySelectorAll([
+        '.kanban-tree-node-name',
+        '.p-treenode-label',
+        'kanban-tree-node',
+        '[class*="tree-node-name"]',
+        '[class*="node-label"]',
+        '[class*="node-title"]',
+      ].join(',')));
       for (const nameEl of nameEls) {
         const currentName = cleanString(nameEl.textContent.trim());
         if (currentName !== targetName && !currentName.startsWith(targetName)) continue;
@@ -276,21 +283,35 @@
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
-    // Wait for the main tree to finish loading after a page load/soft-reload.
-    // Angular fetches tree data asynchronously; we must not search until items exist.
-    // Accept either standard ARIA treeitems or this app's kanban-tree-node-name elements.
-    const treeReady = await waitFor(
-      () => (document.querySelector('[role="treeitem"]') ||
-             document.querySelector('.kanban-tree-node-name')) ? true : null,
-      30000
-    ).catch(() => null);
+    // Helper: returns true when the intent-builder tree has at least one node in the DOM.
+    // Tries every known selector variant so a single missing class doesn't block us.
+    function treeHasNodes() {
+      return !!(
+        document.querySelector('[role="treeitem"]')           ||
+        document.querySelector('.kanban-tree-node-name')      ||
+        document.querySelector('kanban-tree-node')            ||
+        document.querySelector('.p-treenode-content')         ||
+        document.querySelector('.p-treenode')                 ||
+        document.querySelector('[class*="treenode"]')         ||
+        document.querySelector('[class*="tree-node"]')        ||
+        document.querySelector('[class*="kanban-node"]')
+      );
+    }
+
+    // Wait for the main tree to finish loading (Angular fetches data async after route init).
+    const treeReady = await waitFor(() => treeHasNodes() ? true : null, 30000).catch(() => null);
 
     if (!treeReady) {
-      const anyLi    = document.querySelectorAll('li').length;
-      const roles    = [...new Set(Array.from(document.querySelectorAll('[role]'))
-                          .map(el => el.getAttribute('role')))].join(', ');
-      const kanban   = document.querySelectorAll('.kanban-tree-node-name').length;
-      log(`Tree not ready after 30s — li: ${anyLi}, .kanban-tree-node-name: ${kanban}, roles present: [${roles}]`, 'error');
+      // Detailed diagnostic: show what IS in the DOM so we can identify the right selector
+      const roles   = [...new Set(Array.from(document.querySelectorAll('[role]'))
+                         .map(el => el.getAttribute('role')))].join(', ');
+      const classes = [...new Set(
+        Array.from(document.querySelectorAll('*[class]'))
+          .flatMap(el => [...el.classList])
+          .filter(c => /tree|node|kanban|intent/i.test(c))
+      )].slice(0, 20).join(', ');
+      const totalEls = document.querySelectorAll('*').length;
+      log(`Tree not ready after 30s — total elements: ${totalEls}, roles: [${roles}], tree-related classes: [${classes || 'none found'}]`, 'error');
       return null;
     }
 
