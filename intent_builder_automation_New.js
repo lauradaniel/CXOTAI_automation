@@ -278,31 +278,70 @@
     }
   }
 
+  // Nudge Angular's lazy-rendered tree into existence.
+  // Some Angular components only mount after receiving a user interaction
+  // (click, scroll, mousemove) because they use @defer, IntersectionObserver,
+  // or zone-based change detection that hasn't fired yet.
+  async function nudgeTreeToRender() {
+    // 1. Ask Angular to flush pending changes via its debugging API (dev + prod builds)
+    try {
+      const host = document.querySelector('[ng-version], app-root, cxone-ui-app, [_nghost]');
+      if (host) {
+        if (window.ng?.applyChanges) window.ng.applyChanges(host);
+        if (window.ng?.getContext) {
+          const ctx = window.ng.getContext(host);
+          ctx?.changeDetectorRef?.detectChanges?.();
+        }
+      }
+    } catch (_) {}
+
+    // 2. Scroll a few pixels to trigger IntersectionObserver-based lazy loaders
+    window.scrollBy(0, 50);
+    await sleep(150);
+    window.scrollBy(0, -50);
+    await sleep(150);
+
+    // 3. Dispatch mouse events at the centre of the viewport — replicates the
+    //    DevTools "click on element" gesture that makes the tree appear
+    const cx = window.innerWidth  / 2;
+    const cy = window.innerHeight / 2;
+    const target = document.elementFromPoint(cx, cy) || document.body;
+    for (const type of ['mousemove', 'mouseover', 'mouseenter']) {
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: cx, clientY: cy }));
+    }
+    await sleep(500);
+  }
+
   async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
     // Helper: returns true when the intent-builder tree has at least one node in the DOM.
-    // Tries every known selector variant so a single missing class doesn't block us.
     function treeHasNodes() {
       return !!(
-        document.querySelector('[role="treeitem"]')           ||
-        document.querySelector('.kanban-tree-node-name')      ||
-        document.querySelector('kanban-tree-node')            ||
-        document.querySelector('.p-treenode-content')         ||
-        document.querySelector('.p-treenode')                 ||
-        document.querySelector('[class*="treenode"]')         ||
-        document.querySelector('[class*="tree-node"]')        ||
+        document.querySelector('[role="treeitem"]')      ||
+        document.querySelector('.kanban-tree-node-name') ||
+        document.querySelector('kanban-tree-node')       ||
+        document.querySelector('.p-treenode-content')    ||
+        document.querySelector('.p-treenode')            ||
+        document.querySelector('[class*="treenode"]')    ||
+        document.querySelector('[class*="tree-node"]')   ||
         document.querySelector('[class*="kanban-node"]')
       );
     }
 
-    // Wait for the main tree to finish loading (Angular fetches data async after route init).
-    const treeReady = await waitFor(() => treeHasNodes() ? true : null, 30000).catch(() => null);
+    // Wait for the tree, nudging Angular every 8 seconds if nothing appears.
+    let treeReady = false;
+    for (let attempt = 0; attempt < 5 && !treeReady; attempt++) {
+      if (attempt > 0) {
+        log(`  Tree not visible yet — nudging Angular (attempt ${attempt}/4)...`, 'warn');
+        await nudgeTreeToRender();
+      }
+      treeReady = await waitFor(() => treeHasNodes() ? true : null, 8000).catch(() => false);
+    }
 
     if (!treeReady) {
-      // Detailed diagnostic: show what IS in the DOM so we can identify the right selector
       const roles   = [...new Set(Array.from(document.querySelectorAll('[role]'))
                          .map(el => el.getAttribute('role')))].join(', ');
       const classes = [...new Set(
@@ -311,7 +350,7 @@
           .filter(c => /tree|node|kanban|intent/i.test(c))
       )].slice(0, 20).join(', ');
       const totalEls = document.querySelectorAll('*').length;
-      log(`Tree not ready after 30s — total elements: ${totalEls}, roles: [${roles}], tree-related classes: [${classes || 'none found'}]`, 'error');
+      log(`Tree not ready after 40s — total elements: ${totalEls}, roles: [${roles}], tree-related classes: [${classes || 'none found'}]`, 'error');
       return null;
     }
 
