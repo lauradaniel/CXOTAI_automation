@@ -206,28 +206,45 @@
   }
 
   // --- 2. Find the item using robust string matching ---
-  function findItem(name, level, parentLi = null) {
+  function findItem(name, level, parentNode = null) {
     const cleanString = (str) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
     const targetName = cleanString(name);
+    const scope = parentNode || document;
 
-    const scope = parentLi || document;
-
-    // Try the fast aria-level selector first
+    // Strategy 1: aria-level selector (fastest)
     let elements = Array.from(scope.querySelectorAll(`[role="treeitem"][aria-level="${level}"]`));
 
-    // If nothing found with aria-level (e.g. fresh page load where attribute is absent),
-    // fall back to all treeitems and filter by computed depth
+    // Strategy 2: role="treeitem" without aria-level — filter by computed depth
     if (elements.length === 0) {
       elements = Array.from(scope.querySelectorAll('[role="treeitem"]'))
                       .filter(el => getItemLevel(el) === level);
     }
 
-    for (const li of elements) {
-      const rawName = getItemName(li);
+    // Strategy 3: tree rendered without role="treeitem" (e.g. this app's kanban tree).
+    // Find by .kanban-tree-node-name text, then walk up to the structural container.
+    if (elements.length === 0) {
+      const nameEls = Array.from(scope.querySelectorAll('.kanban-tree-node-name, .p-treenode-label'));
+      for (const nameEl of nameEls) {
+        const currentName = cleanString(nameEl.textContent.trim());
+        if (currentName !== targetName && !currentName.startsWith(targetName)) continue;
+        // Walk up to the node container that owns the toggler and more-button
+        const container = nameEl.closest('[role="treeitem"]') ||
+                          nameEl.closest('[aria-level]') ||
+                          nameEl.closest('.p-treenode') ||
+                          nameEl.closest('li') ||
+                          nameEl.parentElement?.parentElement ||
+                          nameEl.parentElement;
+        if (container && container !== scope) return container;
+      }
+      return null;
+    }
+
+    for (const el of elements) {
+      const rawName = getItemName(el);
       if (rawName) {
         const currentName = cleanString(rawName);
         if (currentName === targetName || currentName.startsWith(targetName)) {
-          return li;
+          return el;
         }
       }
     }
@@ -261,16 +278,19 @@
 
     // Wait for the main tree to finish loading after a page load/soft-reload.
     // Angular fetches tree data asynchronously; we must not search until items exist.
+    // Accept either standard ARIA treeitems or this app's kanban-tree-node-name elements.
     const treeReady = await waitFor(
-      () => document.querySelector('[role="treeitem"]') ? true : null,
+      () => (document.querySelector('[role="treeitem"]') ||
+             document.querySelector('.kanban-tree-node-name')) ? true : null,
       30000
     ).catch(() => null);
 
     if (!treeReady) {
-      // Diagnostic: show what's actually in the DOM so we can adjust selectors
-      const anyLi   = document.querySelectorAll('li').length;
-      const anyRole = document.querySelectorAll('[role]').length;
-      log(`Tree not ready after 30s — li count: ${anyLi}, [role] count: ${anyRole}. Check that the Intent Builder tree is visible.`, 'error');
+      const anyLi    = document.querySelectorAll('li').length;
+      const roles    = [...new Set(Array.from(document.querySelectorAll('[role]'))
+                          .map(el => el.getAttribute('role')))].join(', ');
+      const kanban   = document.querySelectorAll('.kanban-tree-node-name').length;
+      log(`Tree not ready after 30s — li: ${anyLi}, .kanban-tree-node-name: ${kanban}, roles present: [${roles}]`, 'error');
       return null;
     }
 
@@ -874,8 +894,9 @@ async function executeMoveMerge(targetLi, changePath) {
       const action = getCol('recommended change') || row['Action'] || '';
       const label  = row['Intent'] || row['Topic'] || row['Category'] || '(unknown)';
 
-      if (!action) {
-        log(`Row ${rowNum}: No action — skipping "${label}"`, 'warn');
+      const VALID_ACTIONS = ['rename', 'move', 'merge', 'deactivate', 'remove'];
+      if (!action || !VALID_ACTIONS.includes(action.toLowerCase())) {
+        log(`Row ${rowNum}: Skipping — action "${action || '(empty)'}" is not in [${VALID_ACTIONS.join(', ')}]`, 'warn');
         skipped++; continue;
       }
 
