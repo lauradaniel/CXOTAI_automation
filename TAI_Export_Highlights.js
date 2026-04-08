@@ -40,15 +40,37 @@
     console.log('%c[CXOne Scraper] WARNING: ' + msg, 'color: #FF9800; font-weight: bold;');
   }
 
-  // Poll for a selector to appear, up to timeoutMs milliseconds
-  async function waitForElement(selector, timeoutMs) {
+  // ── Document context ──────────────────────────────────────────────────
+  // The Intent Builder may live inside an iframe. activeDoc is updated
+  // automatically the first time an element is found in a frame.
+  var activeDoc = document;
+
+  // Search main document AND all accessible same-origin iframes
+  function findInAnyDoc(selector) {
     var el = document.querySelector(selector);
+    if (el) return el;
+    var frames = document.querySelectorAll('iframe');
+    for (var _fi = 0; _fi < frames.length; _fi++) {
+      try {
+        var _fd = frames[_fi].contentDocument ||
+                  (frames[_fi].contentWindow && frames[_fi].contentWindow.document);
+        if (!_fd) continue;
+        var _fe = _fd.querySelector(selector);
+        if (_fe) { activeDoc = _fd; return _fe; }
+      } catch (_e) { /* cross-origin — skip */ }
+    }
+    return null;
+  }
+
+  // Poll until selector appears in main document or any iframe
+  async function waitForElement(selector, timeoutMs) {
+    var el = findInAnyDoc(selector);
     if (el) return el;
     var waited = 0;
     while (waited < timeoutMs) {
       await sleep(500);
       waited += 500;
-      el = document.querySelector(selector);
+      el = findInAnyDoc(selector);
       if (el) return el;
     }
     return null;
@@ -104,12 +126,15 @@
     }
 
     // 2. Model name from .model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]
-    var modelEl = document.querySelector('.model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]');
+    //    Try activeDoc (iframe) first, then main document as fallback
+    var modelEl = activeDoc.querySelector('.model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]');
+    if (!modelEl && activeDoc !== document) modelEl = document.querySelector('.model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]');
     var modelName = modelEl ? modelEl.textContent.trim() : '';
     if (modelName) parts.push(modelName.replace(/\s+/g, '_'));
 
     // 3. Date from span.version-creation-date
-    var dateEl = document.querySelector('span.version-creation-date');
+    var dateEl = activeDoc.querySelector('span.version-creation-date');
+    if (!dateEl && activeDoc !== document) dateEl = document.querySelector('span.version-creation-date');
     var dateStr = dateEl ? dateEl.textContent.trim() : '';
     if (dateStr) parts.push(dateStr.replace(/\s+/g, '_'));
 
@@ -141,15 +166,27 @@
   }
 
   if (!kanbanPanel) {
-    logWarn('Could not find the Intent Builder panel after trying all known selectors.');
-    // Print diagnostics so the correct selector can be identified
+    logWarn('Could not find the Intent Builder panel in main document or any iframe.');
     var _dbgKanban = document.querySelectorAll('[class*="kanban"]');
-    logWarn('  Elements with "kanban" in class (' + _dbgKanban.length + '):');
-    Array.from(_dbgKanban).slice(0, 8).forEach(function(el) {
-      logWarn('    <' + el.tagName.toLowerCase() + '> class="' + el.className + '"');
-    });
-    var _dbgTree = document.querySelectorAll('p-tree');
-    logWarn('  <p-tree> elements found: ' + _dbgTree.length);
+    logWarn('  Main doc — elements with "kanban" in class: ' + _dbgKanban.length);
+    var _dbgFrames = document.querySelectorAll('iframe');
+    logWarn('  iframes on page: ' + _dbgFrames.length);
+    for (var _dfi = 0; _dfi < Math.min(_dbgFrames.length, 8); _dfi++) {
+      try {
+        var _dfd = _dbgFrames[_dfi].contentDocument ||
+                   (_dbgFrames[_dfi].contentWindow && _dbgFrames[_dfi].contentWindow.document);
+        if (_dfd) {
+          var _dfk = _dfd.querySelectorAll('[class*="kanban"]');
+          logWarn('    iframe[' + _dfi + '] accessible, kanban elements: ' + _dfk.length +
+                  ((_dbgFrames[_dfi].src || '').length ? ' (src: ' + _dbgFrames[_dfi].src.substring(0, 60) + ')' : ''));
+        } else {
+          logWarn('    iframe[' + _dfi + '] document not accessible');
+        }
+      } catch (_de) {
+        logWarn('    iframe[' + _dfi + '] CROSS-ORIGIN — blocked. src: ' + (_dbgFrames[_dfi].src || '').substring(0, 60));
+        logWarn('    --> Switch the console frame selector (top-left dropdown in DevTools) to this iframe and re-run.');
+      }
+    }
     logWarn('Make sure the Intent Builder page is fully loaded and the tree is visible.');
     return;
   }
@@ -250,7 +287,7 @@
     await sleep(CLICK_DELAY);
 
     // Read phrases from the detail panel
-	const phrasesContainer = document.querySelector('.phrases-snippets-container');
+	const phrasesContainer = activeDoc.querySelector('.phrases-snippets-container');
 	if (phrasesContainer) {
 	  // Target specific phrase containers or rows if possible. 
 	  // If the structure is generic, we use a more inclusive text-grabbing method:
