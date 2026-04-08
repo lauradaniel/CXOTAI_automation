@@ -40,6 +40,20 @@
     console.log('%c[CXOne Scraper] WARNING: ' + msg, 'color: #FF9800; font-weight: bold;');
   }
 
+  // Poll for a selector to appear, up to timeoutMs milliseconds
+  async function waitForElement(selector, timeoutMs) {
+    var el = document.querySelector(selector);
+    if (el) return el;
+    var waited = 0;
+    while (waited < timeoutMs) {
+      await sleep(500);
+      waited += 500;
+      el = document.querySelector(selector);
+      if (el) return el;
+    }
+    return null;
+  }
+
   // ── Dynamic Filename Builder ──────────────────────────────────────────
   function buildFileName() {
     var parts = [];
@@ -84,11 +98,37 @@
   // ── Step 1: Verify page ────────────────────────────────────────────────
   log('Starting CXOne Intent Scraper...');
 
-  const kanbanPanel = document.querySelector('.kanban-view-panel');
+  // Try multiple selectors in priority order; each waits up to 10 s
+  var KANBAN_CANDIDATES = [
+    '.kanban-view-panel',
+    '[class*="kanban-view"]',
+    '.kanban-panel',
+    '[class*="kanban"]',
+    'p-tree',
+  ];
+
+  var kanbanPanel = null;
+  var usedSelector = '';
+  for (var _kc = 0; _kc < KANBAN_CANDIDATES.length; _kc++) {
+    log('  Looking for: ' + KANBAN_CANDIDATES[_kc] + ' (up to 10 s)…');
+    kanbanPanel = await waitForElement(KANBAN_CANDIDATES[_kc], 10000);
+    if (kanbanPanel) { usedSelector = KANBAN_CANDIDATES[_kc]; break; }
+  }
+
   if (!kanbanPanel) {
-    logWarn('Could not find .kanban-view-panel. Are you on the Intent Builder page?');
+    logWarn('Could not find the Intent Builder panel after trying all known selectors.');
+    // Print diagnostics so the correct selector can be identified
+    var _dbgKanban = document.querySelectorAll('[class*="kanban"]');
+    logWarn('  Elements with "kanban" in class (' + _dbgKanban.length + '):');
+    Array.from(_dbgKanban).slice(0, 8).forEach(function(el) {
+      logWarn('    <' + el.tagName.toLowerCase() + '> class="' + el.className + '"');
+    });
+    var _dbgTree = document.querySelectorAll('p-tree');
+    logWarn('  <p-tree> elements found: ' + _dbgTree.length);
+    logWarn('Make sure the Intent Builder page is fully loaded and the tree is visible.');
     return;
   }
+  log('  Panel found via selector: "' + usedSelector + '"');
 
   // ── Step 2: Expand all collapsed tree nodes ────────────────────────────
   log('Step 1/4: Expanding all collapsed tree nodes...');
