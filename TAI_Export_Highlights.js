@@ -52,6 +52,16 @@
       var match = text.match(/aptrinsic\s*\(\s*['"]identify['"]\s*,[\s\S]*?,\s*\{[^}]*"name"\s*:\s*"([^"]+)"/);
       if (match) { companyName = match[1].trim(); break; }
     }
+    // Fallback: extract tenant name from impersonation action bar
+    // e.g. "You are currently impersonating Impersonated Admin on tenant SUPERIOR PROPANE"
+    if (!companyName) {
+      var barLabel = document.querySelector('.bar-label');
+      if (barLabel) {
+        var barText = barLabel.textContent.trim();
+        var tenantMatch = barText.match(/on tenant\s+(.+)$/i);
+        if (tenantMatch) { companyName = tenantMatch[1].trim(); }
+      }
+    }
     if (companyName) parts.push(companyName.replace(/\s+/g, '_'));
 
     // 2. Model name from .model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]
@@ -251,8 +261,8 @@
   // ────────────────────────────────────────────────────────────────────────
 
   function downloadExcel(data, baseFileName) {
-    var headers = ['Category','Topic','Intent','Intent Percentage','Volume','Examples','Tag'];
-    var keys = ['category','topic','intent','intentPercentage','volume','examples','tag'];
+    var headers = ['Category','Topic','Intent','Intent Percentage','Volume','Examples','Tag','Recommended Changes','Merge to Intent (L3)','Move to Topic (L2)','Updated Intent Name (L3)','Notes','Assign'];
+    var keys = ['category','topic','intent','intentPercentage','volume','examples','tag','recommendedChanges','mergeToIntent','moveToTopic','updatedIntentName','notes','assign'];
 
     function esc(s) {
       if (s == null) return '';
@@ -300,7 +310,7 @@
     var sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
       '<sheetViews><sheetView tabSelected="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' +
-      '<cols><col min="1" max="1" width="25" customWidth="1"/><col min="2" max="2" width="30" customWidth="1"/><col min="3" max="3" width="45" customWidth="1"/><col min="4" max="4" width="18" customWidth="1"/><col min="5" max="5" width="12" customWidth="1"/><col min="6" max="6" width="60" customWidth="1"/><col min="7" max="7" width="10" customWidth="1"/></cols>' +
+      '<cols><col min="1" max="1" width="25" customWidth="1"/><col min="2" max="2" width="30" customWidth="1"/><col min="3" max="3" width="45" customWidth="1"/><col min="4" max="4" width="18" customWidth="1"/><col min="5" max="5" width="12" customWidth="1"/><col min="6" max="6" width="60" customWidth="1"/><col min="7" max="7" width="10" customWidth="1"/><col min="8" max="8" width="25" customWidth="1"/><col min="9" max="9" width="25" customWidth="1"/><col min="10" max="10" width="25" customWidth="1"/><col min="11" max="11" width="25" customWidth="1"/><col min="12" max="12" width="20" customWidth="1"/><col min="13" max="13" width="20" customWidth="1"/></cols>' +
       '<sheetData>' + sr + '</sheetData>' +
       '<autoFilter ref="A1:' + lc + lr + '"/></worksheet>';
 
