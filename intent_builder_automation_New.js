@@ -165,36 +165,94 @@
 
   const normalize = s => (s || '').trim().toLowerCase();
 
- // --- 1. Get the exact name using the built-in accessibility label ---
+ // --- 1. Get the display name of a tree node ---
   function getItemName(li) {
-    // PrimeNG stamps the exact text into the aria-label
-    let name = li.getAttribute('aria-label');
-    if (name) return name;
-    
-    // Fallback just in case
-    const nameDiv = li.querySelector('.kanban-tree-node-name');
-    if (nameDiv) return nameDiv.textContent;
-    
+    // PrimeNG stamps the exact text into aria-label
+    const ariaLabel = li.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel.trim();
+
+    // Known class names used by this app
+    for (const sel of ['.kanban-tree-node-name', '.p-treenode-label', '[class*="node-name"]', '[class*="tree-label"]']) {
+      const el = li.querySelector(sel);
+      if (el) return el.textContent.trim();
+    }
+
+    // Last resort: text inside .p-treenode-content but strip child-list text
+    const content = li.querySelector('.p-treenode-content');
+    if (content) {
+      const clone = content.cloneNode(true);
+      clone.querySelectorAll('ul').forEach(u => u.remove());
+      const t = clone.textContent.trim();
+      if (t) return t;
+    }
+
     return '';
   }
 
+  // --- 1b. Determine the nesting level of a tree node ---
+  function getItemLevel(li) {
+    // Prefer the explicit attribute when present
+    const ariaLevel = parseInt(li.getAttribute('aria-level'), 10);
+    if (!isNaN(ariaLevel) && ariaLevel > 0) return ariaLevel;
+
+    // Fall back to counting treeitem ancestors
+    let level = 1;
+    let el = li.parentElement;
+    while (el) {
+      if (el.matches('[role="treeitem"]')) level++;
+      el = el.parentElement;
+    }
+    return level;
+  }
+
   // --- 2. Find the item using robust string matching ---
-  function findItem(name, level, parentLi = null) {
+  function findItem(name, level, parentNode = null) {
     const cleanString = (str) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
     const targetName = cleanString(name);
-    
-    let scope = parentLi ? parentLi : document;
+    const scope = parentNode || document;
 
-    // Look for PrimeNG tree items at the correct depth
-    const elements = scope.querySelectorAll(`li[role="treeitem"][aria-level="${level}"]`);
-    
-    for (const li of elements) {
-      const rawName = getItemName(li);
+    // Strategy 1: aria-level selector (fastest)
+    let elements = Array.from(scope.querySelectorAll(`[role="treeitem"][aria-level="${level}"]`));
+
+    // Strategy 2: role="treeitem" without aria-level — filter by computed depth
+    if (elements.length === 0) {
+      elements = Array.from(scope.querySelectorAll('[role="treeitem"]'))
+                      .filter(el => getItemLevel(el) === level);
+    }
+
+    // Strategy 3: tree rendered without role="treeitem" (e.g. this app's kanban tree).
+    // Find by any known node-label selector, then walk up to the structural container.
+    if (elements.length === 0) {
+      const nameEls = Array.from(scope.querySelectorAll([
+        '.kanban-tree-node-name',
+        '.p-treenode-label',
+        'kanban-tree-node',
+        '[class*="tree-node-name"]',
+        '[class*="node-label"]',
+        '[class*="node-title"]',
+      ].join(',')));
+      for (const nameEl of nameEls) {
+        const currentName = cleanString(nameEl.textContent.trim());
+        if (currentName !== targetName && !currentName.startsWith(targetName)) continue;
+        // Walk up to the node container that owns the toggler and more-button
+        const container = nameEl.closest('[role="treeitem"]') ||
+                          nameEl.closest('[aria-level]') ||
+                          nameEl.closest('.p-treenode') ||
+                          nameEl.closest('li') ||
+                          nameEl.parentElement?.parentElement ||
+                          nameEl.parentElement;
+        if (container && container !== scope) return container;
+      }
+      return null;
+    }
+
+    for (const el of elements) {
+      const rawName = getItemName(el);
       if (rawName) {
-          const currentName = cleanString(rawName);
-          if (currentName === targetName || currentName.startsWith(targetName)) {
-              return li;
-          }
+        const currentName = cleanString(rawName);
+        if (currentName === targetName || currentName.startsWith(targetName)) {
+          return el;
+        }
       }
     }
     return null;
@@ -220,13 +278,88 @@
     }
   }
 
-  async function locateTarget(row) { 
+  // Nudge Angular's lazy-rendered tree into existence.
+  // Some Angular components only mount after receiving a user interaction
+  // (click, scroll, mousemove) because they use @defer, IntersectionObserver,
+  // or zone-based change detection that hasn't fired yet.
+  async function nudgeTreeToRender() {
+    // 1. Ask Angular to flush pending changes via its debugging API (dev + prod builds)
+    try {
+      const host = document.querySelector('[ng-version], app-root, cxone-ui-app, [_nghost]');
+      if (host) {
+        if (window.ng?.applyChanges) window.ng.applyChanges(host);
+        if (window.ng?.getContext) {
+          const ctx = window.ng.getContext(host);
+          ctx?.changeDetectorRef?.detectChanges?.();
+        }
+      }
+    } catch (_) {}
+
+    // 2. Scroll a few pixels to trigger IntersectionObserver-based lazy loaders
+    window.scrollBy(0, 50);
+    await sleep(150);
+    window.scrollBy(0, -50);
+    await sleep(150);
+
+    // 3. Dispatch mouse events at the centre of the viewport — replicates the
+    //    DevTools "click on element" gesture that makes the tree appear
+    const cx = window.innerWidth  / 2;
+    const cy = window.innerHeight / 2;
+    const target = document.elementFromPoint(cx, cy) || document.body;
+    for (const type of ['mousemove', 'mouseover', 'mouseenter']) {
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: cx, clientY: cy }));
+    }
+    await sleep(500);
+  }
+
+  async function locateTarget(row) {
     const category = row['Category'];
     const topic    = row['Topic'];
     const intent   = row['Intent'];
 
+    // Helper: returns true when the intent-builder tree has at least one node in the DOM.
+    function treeHasNodes() {
+      return !!(
+        document.querySelector('[role="treeitem"]')      ||
+        document.querySelector('.kanban-tree-node-name') ||
+        document.querySelector('kanban-tree-node')       ||
+        document.querySelector('.p-treenode-content')    ||
+        document.querySelector('.p-treenode')            ||
+        document.querySelector('[class*="treenode"]')    ||
+        document.querySelector('[class*="tree-node"]')   ||
+        document.querySelector('[class*="kanban-node"]')
+      );
+    }
+
+    // Wait for the tree, nudging Angular every 8 seconds if nothing appears.
+    let treeReady = false;
+    for (let attempt = 0; attempt < 5 && !treeReady; attempt++) {
+      if (attempt > 0) {
+        log(`  Tree not visible yet — nudging Angular (attempt ${attempt}/4)...`, 'warn');
+        await nudgeTreeToRender();
+      }
+      treeReady = await waitFor(() => treeHasNodes() ? true : null, 8000).catch(() => false);
+    }
+
+    if (!treeReady) {
+      const roles   = [...new Set(Array.from(document.querySelectorAll('[role]'))
+                         .map(el => el.getAttribute('role')))].join(', ');
+      const classes = [...new Set(
+        Array.from(document.querySelectorAll('*[class]'))
+          .flatMap(el => [...el.classList])
+          .filter(c => /tree|node|kanban|intent/i.test(c))
+      )].slice(0, 20).join(', ');
+      const totalEls = document.querySelectorAll('*').length;
+      log(`Tree not ready after 40s — total elements: ${totalEls}, roles: [${roles}], tree-related classes: [${classes || 'none found'}]`, 'error');
+      return null;
+    }
+
     const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
-    if (!catItem) { log(`Category not found: "${category}"`, 'error'); return null; }
+    if (!catItem) {
+      const allItems = document.querySelectorAll('[role="treeitem"]');
+      log(`Category not found: "${category}" — ${allItems.length} treeitem(s) visible. First: "${allItems[0]?.getAttribute('aria-label') || allItems[0]?.textContent?.trim()}"`, 'error');
+      return null;
+    }
     if (!topic) return catItem;
 
     await expandItem(catItem);
@@ -525,17 +658,28 @@ async function performMerge(targetLi, change, newName) {
     // 1. Execute the first step (finding the branch and clicking Save)
     await executeMoveMerge(targetLi, change);
 
-    // 2. Wait for the second Merge confirmation popup
+    // 2. Wait for the Move/Merge tree dialog to fully close before looking for the next one.
+    //    The first dialog uses AG-Grid ([role="treegrid"]) — wait until it's gone.
+    log('  Waiting for tree dialog to close...');
+    await waitFor(
+      () => {
+        const grid = document.querySelector('[role="treegrid"], .ag-root-wrapper');
+        return (!grid || grid.offsetParent === null) ? true : null;
+      },
+      CFG.waitTimeout
+    ).catch(() => null);
     await sleep(CFG.dialogDelay);
-    
+
+    // 3. Wait for the second Merge confirmation popup.
+    //    Must have a text input AND must NOT contain an AG-Grid tree (that would be the first dialog still closing).
     const secondModal = await waitFor(() => {
-        // Look for any dialog that has a text input and is NOT the tree menu
         const modals = Array.from(document.querySelectorAll('cxone-modal, merge-modal, .p-dialog, [role="dialog"]'));
         return modals.find(m => {
-            const hasInput = m.querySelector('input:not([type="hidden"]), textarea');
-            const isVisible = m.offsetParent !== null || m.style.display !== 'none';
-            const isNotTreeModal = !m.querySelector('.p-treenode, [role="treeitem"]'); // Ensure we moved past the first modal
-            return hasInput && isVisible && isNotTreeModal;
+            const hasInput    = m.querySelector('input:not([type="hidden"]), textarea');
+            const isVisible   = m.offsetParent !== null || m.style.display !== 'none';
+            const hasNoGrid   = !m.querySelector('[role="treegrid"], .ag-root-wrapper, .ag-root');
+            const hasNoTree   = !m.querySelector('.p-treenode, [role="treeitem"]');
+            return hasInput && isVisible && hasNoGrid && hasNoTree;
         });
     }, CFG.waitTimeout);
 
@@ -687,68 +831,87 @@ async function executeMoveMerge(targetLi, changePath) {
       throw new Error(`Destination branch "${targetNodeName}" not found in the tree after exhaustive scrolling.`);
     }
 
-    // 6. Select the target node
-    const row = nodeSpan.closest('[role="row"], .ag-row, .p-treenode-content');
-    if (row) {
-      row.scrollIntoView({ behavior: 'instant', block: 'center' });
-      await sleep(CFG.shortDelay);
+    // 6. Select the target node.
+    // IMPORTANT: click only the .ag-cell, never the span directly — clicking the
+    // text span on a group row triggers AG-Grid's expand/collapse, not row selection.
+    const row = nodeSpan.closest('[role="row"]') || nodeSpan.closest('.ag-row');
+    if (!row) throw new Error('Could not resolve AG-Grid row for the target node');
 
-      row.click();
-      await sleep(CFG.shortDelay);
-      
-      const cell = nodeSpan.closest('.ag-cell, .p-treenode-label');
-      if (cell) cell.click();
-      
-      nodeSpan.click();
-      await sleep(CFG.shortDelay);
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await sleep(CFG.shortDelay);
+
+    const cell = nodeSpan.closest('.ag-cell') || row;
+    cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await sleep(50);
+    cell.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true }));
+    cell.click();
+
+    // Give AG-Grid time to process the selection and enable the Save button.
+    // Do NOT retry with row.click() — on group rows that triggers expand/collapse.
+    await sleep(CFG.actionDelay);
+
+    // 7. Wait for the Primary Action Button (Save / Next / Move / Merge) to become enabled.
+    // Angular CDK portals overlay content to <body> in DOM order — the LAST visible save
+    // button belongs to the most recently opened dialog (our Move/Merge modal).
+    log('  Waiting for Save/Next button to become enabled...');
+
+    function isElVisible(el) {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.top >= 0 && r.bottom <= window.innerHeight + 100;
     }
 
-    // 7. Wait for the Primary Action Button (Save / Next / Move / Merge) to become enabled
-    log('  Waiting for Save/Next button to become enabled...');
+    function findSaveBtn() {
+      // Try scoped footer wrappers first (most specific)
+      for (const sel of [
+        '.modal-footer-wrapper .save-btn',
+        '.modal-footer-wrapper .btn-primary',
+        '.p-dialog-footer .p-button-primary',
+      ]) {
+        const el = document.querySelector(sel);
+        if (el && isElVisible(el)) return el;
+      }
+      // Fall back: collect ALL visible save/primary buttons and return the LAST one.
+      // Angular CDK appends overlay panels to <body> in opening order, so the last
+      // visible button belongs to the topmost (most recently opened) dialog.
+      const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
+        if (!isElVisible(b)) return false;
+        const txt = b.textContent.trim().toLowerCase();
+        if (b.classList.contains('cancel-btn') || txt === 'cancel' || txt === 'close') return false;
+        return b.classList.contains('save-btn') || b.classList.contains('btn-primary') ||
+               txt.match(/^(save|merge|move|next|confirm|submit)$/i);
+      });
+      return candidates.length ? candidates[candidates.length - 1] : null;
+    }
+
+    function isBtnDisabled(btn) {
+      return btn.disabled ||
+             btn.classList.contains('p-disabled') ||
+             btn.classList.contains('disabled') ||
+             btn.getAttribute('aria-disabled') === 'true' ||
+             btn.getAttribute('ng-reflect-disabled') === 'true';
+    }
+
     const actionBtn = await waitFor(
-      () => {
-        let btn = modal.querySelector('.modal-footer-wrapper .save-btn') ||
-                  modal.querySelector('.modal-footer-wrapper .btn-primary') ||
-                  modal.querySelector('.p-dialog-footer .p-button-primary');
-
-        if (!btn) {
-          const buttons = Array.from(modal.querySelectorAll('button'));
-          btn = buttons.find(b => {
-            const text = b.textContent.trim().toLowerCase();
-            const isCancel = b.classList.contains('cancel-btn') || text === 'cancel' || text === 'close';
-            if (isCancel) return false;
-            return b.classList.contains('save-btn') || b.classList.contains('btn-primary') ||
-                   text.match(/^(save|merge|move|next|confirm|submit)$/i);
-          });
-        }
-
-        if (!btn) return null;
-
-        // Only return the button once it is actually enabled
-        const isDisabled = btn.disabled ||
-                           btn.classList.contains('p-disabled') ||
-                           btn.classList.contains('disabled') ||
-                           btn.getAttribute('aria-disabled') === 'true';
-        return isDisabled ? null : btn;
-      },
+      () => { const b = findSaveBtn(); return (b && !isBtnDisabled(b)) ? b : null; },
       8000
     ).catch(() => null);
 
     if (!actionBtn) throw new Error('Primary action button (Save/Next) not found or never became enabled after selecting the destination node.');
+    log(`  Clicking Save button: "${actionBtn.textContent.trim()}"`);
 
     actionBtn.scrollIntoView({ block: 'center' });
     await sleep(100);
 
     // Fire a full suite of pointer and mouse events on the inner span and the button itself
     const innerSpan = actionBtn.querySelector('span');
-    const clickTarget = innerSpan || actionBtn;
+    const btnTarget = innerSpan || actionBtn;
 
-    clickTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-    clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    btnTarget.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    btnTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     await sleep(50);
-    clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    clickTarget.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-    clickTarget.click();
+    btnTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    btnTarget.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    btnTarget.click();
 
     // Fallback native click on the button itself just in case the framework bound it there
     if (innerSpan) actionBtn.click();
@@ -791,8 +954,9 @@ async function executeMoveMerge(targetLi, changePath) {
       const action = getCol('recommended change') || row['Action'] || '';
       const label  = row['Intent'] || row['Topic'] || row['Category'] || '(unknown)';
 
-      if (!action) {
-        log(`Row ${rowNum}: No action — skipping "${label}"`, 'warn');
+      const VALID_ACTIONS = ['rename', 'move', 'merge', 'deactivate', 'remove'];
+      if (!action || !VALID_ACTIONS.includes(action.toLowerCase())) {
+        log(`Row ${rowNum}: Skipping — action "${action || '(empty)'}" is not in [${VALID_ACTIONS.join(', ')}]`, 'warn');
         skipped++; continue;
       }
 
