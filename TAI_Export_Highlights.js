@@ -64,19 +64,44 @@
     for (var s = 0; s < scripts.length; s++) {
       var text = scripts[s].textContent || '';
       var match = text.match(/aptrinsic\s*\(\s*['"]identify['"]\s*,[\s\S]*?,\s*\{[^}]*"name"\s*:\s*"([^"]+)"/);
-      if (match) { companyName = match[1].trim(); break; }
+      if (match) { companyName = match[1].trim(); log('  Company (aptrinsic): ' + companyName); break; }
     }
-    // Fallback: extract tenant name from impersonation action bar
-    // e.g. "You are currently impersonating Impersonated Admin on tenant SUPERIOR PROPANE"
+
+    // Fallback: scan action-bar selectors for "on tenant <NAME>"
     if (!companyName) {
-      var barLabel = document.querySelector('.bar-label');
-      if (barLabel) {
-        var barText = barLabel.textContent.trim();
-        var tenantMatch = barText.match(/on tenant\s+(.+)$/i);
-        if (tenantMatch) { companyName = tenantMatch[1].trim(); }
+      var _barSelectors = [
+        '.cxone-action-bar .bar-label',
+        '.bar-label',
+        '.cxone-action-bar label',
+        '[class*="action-bar"] label',
+        '[class*="bar-label"]',
+      ];
+      for (var _bi = 0; _bi < _barSelectors.length; _bi++) {
+        var _barEl = document.querySelector(_barSelectors[_bi]);
+        if (_barEl) {
+          log('  Action-bar element found via "' + _barSelectors[_bi] + '": ' + _barEl.textContent.trim().substring(0, 80));
+          var _tm = _barEl.textContent.trim().match(/on tenant\s+(.+)/i);
+          if (_tm) { companyName = _tm[1].trim(); log('  Company (action-bar): ' + companyName); break; }
+        }
       }
     }
-    if (companyName) parts.push(companyName.replace(/\s+/g, '_'));
+
+    // Last resort: scan every <label> on the page
+    if (!companyName) {
+      var _allLabels = document.querySelectorAll('label');
+      log('  Scanning all ' + _allLabels.length + ' <label> elements for "on tenant"…');
+      for (var _li = 0; _li < _allLabels.length; _li++) {
+        var _lt = _allLabels[_li].textContent.trim();
+        var _lm = _lt.match(/on tenant\s+(.+)/i);
+        if (_lm) { companyName = _lm[1].trim(); log('  Company (label scan): ' + companyName); break; }
+      }
+    }
+
+    if (companyName) {
+      parts.push(companyName.replace(/\s+/g, '_'));
+    } else {
+      logWarn('Company name not found — check console output above for clues.');
+    }
 
     // 2. Model name from .model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]
     var modelEl = document.querySelector('.model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]');
