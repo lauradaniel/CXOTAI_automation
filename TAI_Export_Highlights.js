@@ -122,7 +122,19 @@
     if (companyName) {
       parts.push(companyName.replace(/\s+/g, '_'));
     } else {
-      logWarn('Company name not found — check console output above for clues.');
+      logWarn('Company name not found automatically — showing manual input prompt.');
+      var _manual = window.prompt(
+        'Company name could not be detected automatically.\n' +
+        'Please type it exactly as shown on screen (e.g. SUPERIOR PROPANE):',
+        ''
+      );
+      if (_manual && _manual.trim()) {
+        companyName = _manual.trim();
+        log('  Company (manual entry): ' + companyName);
+        parts.push(companyName.replace(/\s+/g, '_'));
+      } else {
+        logWarn('No company name entered — it will be omitted from the filename.');
+      }
     }
 
     // 2. Model name from .model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]
