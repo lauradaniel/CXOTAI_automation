@@ -192,6 +192,12 @@
   }
   log('  Panel found via selector: "' + usedSelector + '"');
 
+  // ── Capture filename NOW while the page is in its original state ───────
+  // (activeDoc is now set to the correct frame, company name / model / date
+  //  are all visible before any intent clicks alter the page)
+  var baseFileName = buildFileName();
+  log('  Filename will be: ' + baseFileName);
+
   // ── Step 2: Expand all collapsed tree nodes ────────────────────────────
   log('Step 1/4: Expanding all collapsed tree nodes...');
 
@@ -337,7 +343,6 @@
 
   // ── Step 5: Download ───────────────────────────────────────────────────
   log('Step 4/4: Generating Excel file...');
-  var baseFileName = buildFileName();
   log('  Filename: ' + baseFileName);
   downloadExcel(rows, baseFileName);
 
