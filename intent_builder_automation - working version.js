@@ -49,6 +49,32 @@
 
 
   // ─────────────────────────────────────────────
+  // IFRAME / DOCUMENT RESOLVER
+  // Some deployments embed the Intent Builder inside an <iframe>.
+  // Running in the browser console, `document` refers to the TOP-LEVEL page,
+  // so document.querySelector can't see anything inside the iframe.
+  // findAppDoc() searches same-origin iframes for the app container and
+  // returns the correct document to use for all DOM queries.
+  // ─────────────────────────────────────────────
+  function findAppDoc() {
+    // Use window.document explicitly so this function is immune to the
+    // appDoc replacement that covers the rest of the script.
+    const topDoc = window.document;
+    if (topDoc.querySelector('.app-panel, kanban-view, p-tree')) return topDoc;
+    for (const fr of topDoc.querySelectorAll('iframe')) {
+      try {
+        const d = fr.contentDocument || fr.contentWindow?.document;
+        if (d && d.querySelector('.app-panel, kanban-view, p-tree')) return d;
+      } catch(e) { /* cross-origin iframe — skip */ }
+    }
+    return topDoc; // fallback
+  }
+
+  // Resolved once at the start of run(); every DOM query below uses this.
+  let appDoc = window.document;
+
+
+  // ─────────────────────────────────────────────
   // UTILITIES
   // ─────────────────────────────────────────────
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -87,7 +113,7 @@
 
   async function tryCloseDialog() {
     // Covers both the main tree dialogs and the Move/Merge cxone-modal
-    const btn = document.querySelector([
+    const btn = appDoc.querySelector([
       'i.close-button',
       'button.cancel-btn',
       'p-dialog .p-dialog-header-close',
@@ -210,7 +236,7 @@
     const cleanString = (str) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
     const targetName = cleanString(name);
 
-    const scope = parentLi || document;
+    const scope = parentLi || appDoc;
 
     // Try the fast aria-level selector first
     let elements = Array.from(scope.querySelectorAll(`[role="treeitem"][aria-level="${level}"]`));
@@ -265,21 +291,21 @@
     // the server and all 12 kanban columns briefly have zero treeitems — this can
     // take longer than the old 30 s limit on slow networks.
     const treeReady = await waitFor(
-      () => document.querySelector('[role="treeitem"]') ? true : null,
+      () => appDoc.querySelector('[role="treeitem"]') ? true : null,
       60000
     ).catch(() => null);
 
     if (!treeReady) {
       // Diagnostic: show what's actually in the DOM so we can adjust selectors
-      const anyLi   = document.querySelectorAll('li').length;
-      const anyRole = document.querySelectorAll('[role]').length;
+      const anyLi   = appDoc.querySelectorAll('li').length;
+      const anyRole = appDoc.querySelectorAll('[role]').length;
       log(`Tree not ready after 60s — li count: ${anyLi}, [role] count: ${anyRole}. Make sure the Intent Builder tree is visible and the page has finished loading.`, 'error');
       return null;
     }
 
     const catItem = await waitFor(() => findItem(category, 1), CFG.waitTimeout).catch(() => null);
     if (!catItem) {
-      const allItems = document.querySelectorAll('[role="treeitem"]');
+      const allItems = appDoc.querySelectorAll('[role="treeitem"]');
       log(`Category not found: "${category}" — ${allItems.length} treeitem(s) visible. First: "${allItems[0]?.getAttribute('aria-label') || allItems[0]?.textContent?.trim()}"`, 'error');
       return null;
     }
@@ -312,7 +338,7 @@
     // 2. Wait up to 5 s for treeitems to disappear — confirms the reload began.
     //    If the app did a local-only update and items never disappeared, skip this.
     const didEmpty = await waitFor(
-      () => document.querySelectorAll('[role="treeitem"]').length === 0 ? true : null,
+      () => appDoc.querySelectorAll('[role="treeitem"]').length === 0 ? true : null,
       5000
     ).catch(() => null);
 
@@ -322,7 +348,7 @@
 
     // 3. Wait up to 60 s for treeitems to reappear.
     const ready = await waitFor(
-      () => document.querySelector('[role="treeitem"]') ? true : null,
+      () => appDoc.querySelector('[role="treeitem"]') ? true : null,
       60000
     ).catch(() => null);
 
@@ -347,7 +373,7 @@
   async function clickMenuOption(label) {
     const target = normalize(label);
     const el = await waitFor(() => {
-      const containers = document.querySelectorAll([
+      const containers = appDoc.querySelectorAll([
         'p-overlaypanel', '.p-overlaypanel', '.p-menu', '.p-contextmenu',
         '[role="menu"]', '.cxone-menu', '.dropdown-menu', '.context-menu',
       ].join(','));
@@ -357,7 +383,7 @@
           if (normalize(item.textContent).includes(target)) return item;
         }
       }
-      for (const el of document.querySelectorAll('li, [role="menuitem"], button.p-menuitem-link')) {
+      for (const el of appDoc.querySelectorAll('li, [role="menuitem"], button.p-menuitem-link')) {
         if (normalize(el.textContent).trim() === target && el.offsetParent !== null) return el;
       }
       return null;
@@ -369,7 +395,7 @@
   async function clickDialogButton(...labels) {
     const targets = labels.map(normalize);
     const btn = await waitFor(() => {
-      for (const d of document.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container')) {
+      for (const d of appDoc.querySelectorAll('p-dialog,.p-dialog,[role="dialog"],mat-dialog-container')) {
         for (const b of d.querySelectorAll('button')) {
           if (targets.includes(normalize(b.textContent).trim()) && !b.disabled) return b;
         }
@@ -431,7 +457,7 @@
   /** Returns all currently-rendered AG-Grid rows at a specific level. */
   function getGridRows(level) {
     return Array.from(
-      document.querySelectorAll(`[role="treegrid"] [role="row"].ag-row-level-${level}`)
+      appDoc.querySelectorAll(`[role="treegrid"] [role="row"].ag-row-level-${level}`)
     );
   }
 
@@ -458,9 +484,9 @@
 
     // Locate the AG-Grid scrollable viewport inside the dialog
     const viewport =
-      document.querySelector('[role="treegrid"] .ag-body-viewport') ||
-      document.querySelector('[role="treegrid"] .ag-center-cols-viewport') ||
-      document.querySelector('.ag-body-viewport');
+      appDoc.querySelector('[role="treegrid"] .ag-body-viewport') ||
+      appDoc.querySelector('[role="treegrid"] .ag-center-cols-viewport') ||
+      appDoc.querySelector('.ag-body-viewport');
 
     if (!viewport) {
       log('  AG-Grid viewport not found, cannot scroll', 'warn');
@@ -503,7 +529,7 @@
 
     // Wait for the AG-Grid treegrid to appear inside the modal
     await waitFor(
-      () => document.querySelector('[role="treegrid"]'),
+      () => appDoc.querySelector('[role="treegrid"]'),
       CFG.waitTimeout
     );
     await sleep(CFG.shortDelay);
@@ -572,7 +598,7 @@
     // Save button becomes enabled once a row is selected
     const saveBtn = await waitFor(
       () => {
-        const btn = document.querySelector('button.save-btn');
+        const btn = appDoc.querySelector('button.save-btn');
         return (btn && !btn.disabled) ? btn : null;
       },
       5000
@@ -589,7 +615,7 @@
   async function performRename(li, newName) {
     await openMoreMenu(li);
     await clickMenuOption('Rename');
-    const input = await waitFor(() => document.querySelector([
+    const input = await waitFor(() => appDoc.querySelector([
       'p-dialog input[type="text"]', '.p-dialog input[type="text"]',
       '[role="dialog"] input[type="text"]', 'mat-dialog-container input[type="text"]',
     ].join(',')));
@@ -620,7 +646,7 @@ async function performMerge(targetLi, change, newName) {
     log('  Waiting for tree dialog to close...');
     await waitFor(
       () => {
-        const grid = document.querySelector('[role="treegrid"], .ag-root-wrapper');
+        const grid = appDoc.querySelector('[role="treegrid"], .ag-root-wrapper');
         return (!grid || grid.offsetParent === null) ? true : null;
       },
       CFG.waitTimeout
@@ -630,7 +656,7 @@ async function performMerge(targetLi, change, newName) {
     // 3. Wait for the second Merge confirmation popup.
     //    Must have a text input AND must NOT contain an AG-Grid tree (that would be the first dialog still closing).
     const secondModal = await waitFor(() => {
-        const modals = Array.from(document.querySelectorAll('cxone-modal, merge-modal, .p-dialog, [role="dialog"]'));
+        const modals = Array.from(appDoc.querySelectorAll('cxone-modal, merge-modal, .p-dialog, [role="dialog"]'));
         return modals.find(m => {
             const hasInput    = m.querySelector('input:not([type="hidden"]), textarea');
             const isVisible   = m.offsetParent !== null || m.style.display !== 'none';
@@ -704,12 +730,12 @@ async function executeMoveMerge(targetLi, changePath) {
     await sleep(CFG.actionDelay);
 
     // 2. Select Move/Merge option in the dropdown
-    const allTextElements = Array.from(document.querySelectorAll('*')).filter(el => el.children.length === 0 && el.textContent.trim() === 'Move/Merge');
+    const allTextElements = Array.from(appDoc.querySelectorAll('*')).filter(el => el.children.length === 0 && el.textContent.trim() === 'Move/Merge');
     const moveMergeOpt = allTextElements.find(el => el.offsetWidth > 0 && el.offsetHeight > 0);
     
     if (moveMergeOpt) {
         moveMergeOpt.click();
-        if (document.activeElement) document.activeElement.blur(); // Clears accessibility warning
+        if (appDoc.activeElement) appDoc.activeElement.blur(); // Clears accessibility warning
     } else {
         throw new Error('Move/Merge option not found in the dropdown menu');
     }
@@ -717,7 +743,7 @@ async function executeMoveMerge(targetLi, changePath) {
     await sleep(CFG.dialogDelay);
 
     // 3. Wait for the AG-Grid/Tree popup modal
-    const modal = await waitFor(() => document.querySelector('move-to-modal, cxone-modal, .p-dialog'), CFG.waitTimeout);
+    const modal = await waitFor(() => appDoc.querySelector('move-to-modal, cxone-modal, .p-dialog'), CFG.waitTimeout);
     if (!modal) throw new Error('Move/Merge popup did not open');
 
     // 4. Parse the target destination from CSV
@@ -824,13 +850,13 @@ async function executeMoveMerge(targetLi, changePath) {
         '.modal-footer-wrapper .btn-primary',
         '.p-dialog-footer .p-button-primary',
       ]) {
-        const el = document.querySelector(sel);
+        const el = appDoc.querySelector(sel);
         if (el && isElVisible(el)) return el;
       }
       // Fall back: collect ALL visible save/primary buttons and return the LAST one.
       // Angular CDK appends overlay panels to <body> in opening order, so the last
       // visible button belongs to the topmost (most recently opened) dialog.
-      const candidates = Array.from(document.querySelectorAll('button')).filter(b => {
+      const candidates = Array.from(appDoc.querySelectorAll('button')).filter(b => {
         if (!isElVisible(b)) return false;
         const txt = b.textContent.trim().toLowerCase();
         if (b.classList.contains('cancel-btn') || txt === 'cancel' || txt === 'close') return false;
@@ -882,6 +908,15 @@ async function executeMoveMerge(targetLi, changePath) {
   // ─────────────────────────────────────────────
   async function run() {
     log('=== Intent Builder Automation Started ===');
+
+    // Resolve the document that hosts the Intent Builder tree.
+    // Must happen before any DOM query (the app may be inside an iframe).
+    appDoc = findAppDoc();
+    if (appDoc !== window.document) {
+      log('App detected inside an iframe — all DOM queries routed through iframe document.', 'info');
+    } else {
+      log('App found in main document.', 'info');
+    }
 
     let csvText;
     try { csvText = await pickCSVFile(); }
