@@ -261,16 +261,19 @@
 
     // Wait for the main tree to finish loading after a page load/soft-reload.
     // Angular fetches tree data asynchronously; we must not search until items exist.
+    // 60 s timeout: after a Remove/Deactivate the app re-fetches all tree data from
+    // the server and all 12 kanban columns briefly have zero treeitems — this can
+    // take longer than the old 30 s limit on slow networks.
     const treeReady = await waitFor(
       () => document.querySelector('[role="treeitem"]') ? true : null,
-      30000
+      60000
     ).catch(() => null);
 
     if (!treeReady) {
       // Diagnostic: show what's actually in the DOM so we can adjust selectors
       const anyLi   = document.querySelectorAll('li').length;
       const anyRole = document.querySelectorAll('[role]').length;
-      log(`Tree not ready after 30s — li count: ${anyLi}, [role] count: ${anyRole}. Check that the Intent Builder tree is visible.`, 'error');
+      log(`Tree not ready after 60s — li count: ${anyLi}, [role] count: ${anyRole}. Make sure the Intent Builder tree is visible and the page has finished loading.`, 'error');
       return null;
     }
 
@@ -293,6 +296,40 @@
 
     await scrollIntoView(intentItem);
     return intentItem;
+  }
+
+
+  // ─────────────────────────────────────────────
+  // TREE RELOAD WAIT
+  // After a Remove/Deactivate the app re-fetches all 12 kanban tree columns from
+  // the server. During the fetch, every [role="treeitem"] node disappears. This
+  // helper detects that empty window and waits up to 60 s for the data to return.
+  // ─────────────────────────────────────────────
+  async function waitForTreeReload() {
+    // 1. Brief pause so Angular has time to start its reload cycle.
+    await sleep(1500);
+
+    // 2. Wait up to 5 s for treeitems to disappear — confirms the reload began.
+    //    If the app did a local-only update and items never disappeared, skip this.
+    const didEmpty = await waitFor(
+      () => document.querySelectorAll('[role="treeitem"]').length === 0 ? true : null,
+      5000
+    ).catch(() => null);
+
+    if (didEmpty) {
+      log('  Tree is reloading — waiting for data to reappear...', 'info');
+    }
+
+    // 3. Wait up to 60 s for treeitems to reappear.
+    const ready = await waitFor(
+      () => document.querySelector('[role="treeitem"]') ? true : null,
+      60000
+    ).catch(() => null);
+
+    if (!ready) {
+      log('  Warning: tree did not reload within 60 s — proceeding anyway.', 'warn');
+    }
+    return ready;
   }
 
 
@@ -904,7 +941,11 @@ async function executeMoveMerge(targetLi, changePath) {
             
           case 'deactivate':
           case 'remove': // Kept as a fallback just in case old files are used
-            await performRemove(target); break;
+            await performRemove(target);
+            // Remove triggers a full server-side tree refresh; wait for all 12
+            // kanban columns to reload before processing the next row.
+            await waitForTreeReload();
+            break;
             
           case 'move':
             if (!moveTarget) throw new Error('Column "Move to Topic (L2)" is empty');
