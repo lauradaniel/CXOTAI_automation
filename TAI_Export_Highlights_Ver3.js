@@ -115,11 +115,14 @@
 
     // 1c. Page <title> — CXone titles often contain the tenant/company name
     //     e.g. "Intent Builder | Acme Corp" or "Acme Corp - NICE CXone"
+    //     Uses document (top-level only) — the company name lives outside the iframe.
     if (!companyName) {
       var _title = document.title || '';
       log('  Page title: "' + _title + '"');
       var _titleParts = _title.split(/\s*[|\-–]\s*/);
-      var _GENERIC = /^(nice|cxone|cxone\s*intent|intent\s*builder|topic\s*ai|home|login|loading)$/i;
+      // Match any part that STARTS WITH a known app/platform word — catches
+      // "TopicAI Editor", "Intent Builder v2", "CXone Home", etc.
+      var _GENERIC = /^(nice(\s|$)|cxone(\s|$)|intent\s*builder|topic\s*ai|topicai|home(\s|$)|login(\s|$)|loading(\s|$))/i;
       for (var _tp = 0; _tp < _titleParts.length; _tp++) {
         var _tc = _titleParts[_tp].trim();
         if (_tc && !_GENERIC.test(_tc)) {
@@ -149,11 +152,11 @@
       }
     }
 
-    // 1e. Broader DOM scan for "on tenant <NAME>" — check both documents,
-    //     targeting small leaf-ish elements to avoid grabbing huge text blocks
+    // 1e. Broader DOM scan for "on tenant <NAME>" — top-level document only.
+    //     Company name lives outside the iframe; scanning activeDoc risks
+    //     picking up app-internal text (e.g. "TopicAI Editor").
     if (!companyName) {
-      var _docsToScan = [document];
-      if (activeDoc !== document) _docsToScan.push(activeDoc);
+      var _docsToScan = [document]; // intentionally top-level only
       outer:
       for (var _di = 0; _di < _docsToScan.length; _di++) {
         var _scanEls = _docsToScan[_di].querySelectorAll(
