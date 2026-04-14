@@ -40,6 +40,42 @@
     console.log('%c[CXOne Scraper] WARNING: ' + msg, 'color: #FF9800; font-weight: bold;');
   }
 
+  // ── Document context ──────────────────────────────────────────────────
+  // The Intent Builder may live inside an iframe. activeDoc is updated
+  // automatically the first time an element is found in a frame.
+  var activeDoc = document;
+
+  // Search main document AND all accessible same-origin iframes
+  function findInAnyDoc(selector) {
+    var el = document.querySelector(selector);
+    if (el) return el;
+    var frames = document.querySelectorAll('iframe');
+    for (var _fi = 0; _fi < frames.length; _fi++) {
+      try {
+        var _fd = frames[_fi].contentDocument ||
+                  (frames[_fi].contentWindow && frames[_fi].contentWindow.document);
+        if (!_fd) continue;
+        var _fe = _fd.querySelector(selector);
+        if (_fe) { activeDoc = _fd; return _fe; }
+      } catch (_e) { /* cross-origin — skip */ }
+    }
+    return null;
+  }
+
+  // Poll until selector appears in main document or any iframe
+  async function waitForElement(selector, timeoutMs) {
+    var el = findInAnyDoc(selector);
+    if (el) return el;
+    var waited = 0;
+    while (waited < timeoutMs) {
+      await sleep(500);
+      waited += 500;
+      el = findInAnyDoc(selector);
+      if (el) return el;
+    }
+    return null;
+  }
+
   // ── Dynamic Filename Builder ──────────────────────────────────────────
   function buildFileName() {
     var parts = [];
@@ -50,32 +86,57 @@
     for (var s = 0; s < scripts.length; s++) {
       var text = scripts[s].textContent || '';
       var match = text.match(/aptrinsic\s*\(\s*['"]identify['"]\s*,[\s\S]*?,\s*\{[^}]*"name"\s*:\s*"([^"]+)"/);
-      if (match) { companyName = match[1].trim(); break; }
+      if (match) { companyName = match[1].trim(); log('  Company (aptrinsic): ' + companyName); break; }
     }
-    if (companyName) parts.push(companyName.replace(/\s+/g, '_'));
+
+    // Fallback: scan action-bar selectors for "on tenant <NAME>"
+    if (!companyName) {
+      var _barSelectors = [
+        '.cxone-action-bar .bar-label',
+        '.bar-label',
+        '.cxone-action-bar label',
+        '[class*="action-bar"] label',
+        '[class*="bar-label"]',
+      ];
+      for (var _bi = 0; _bi < _barSelectors.length; _bi++) {
+        var _barEl = document.querySelector(_barSelectors[_bi]);
+        if (_barEl) {
+          log('  Action-bar element found via "' + _barSelectors[_bi] + '": ' + _barEl.textContent.trim().substring(0, 80));
+          var _tm = _barEl.textContent.trim().match(/on tenant\s+(.+)/i);
+          if (_tm) { companyName = _tm[1].trim(); log('  Company (action-bar): ' + companyName); break; }
+        }
+      }
+    }
+
+    // Last resort: scan every <label> on the page
+    if (!companyName) {
+      var _allLabels = document.querySelectorAll('label');
+      log('  Scanning all ' + _allLabels.length + ' <label> elements for "on tenant"…');
+      for (var _li = 0; _li < _allLabels.length; _li++) {
+        var _lt = _allLabels[_li].textContent.trim();
+        var _lm = _lt.match(/on tenant\s+(.+)/i);
+        if (_lm) { companyName = _lm[1].trim(); log('  Company (label scan): ' + companyName); break; }
+      }
+    }
+
+    if (companyName) {
+      parts.push(companyName.replace(/\s+/g, '_'));
+    } else {
+      logWarn('Company name not found — check console output above for clues.');
+    }
 
     // 2. Model name from .model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]
-    var modelEl = document.querySelector('.model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]');
+    //    Try activeDoc (iframe) first, then main document as fallback
+    var modelEl = activeDoc.querySelector('.model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]');
+    if (!modelEl && activeDoc !== document) modelEl = document.querySelector('.model-selection-dropdown-wrapper span[data-aid="ellipsis-sliced-text"]');
     var modelName = modelEl ? modelEl.textContent.trim() : '';
     if (modelName) parts.push(modelName.replace(/\s+/g, '_'));
 
     // 3. Date from span.version-creation-date
-    var dateEl = document.querySelector('span.version-creation-date');
+    var dateEl = activeDoc.querySelector('span.version-creation-date');
+    if (!dateEl && activeDoc !== document) dateEl = document.querySelector('span.version-creation-date');
     var dateStr = dateEl ? dateEl.textContent.trim() : '';
     if (dateStr) parts.push(dateStr.replace(/\s+/g, '_'));
-
-    // 4. Item type from the "Actions / Intents" dropdown (.item-type-dropdown)
-    //    Primary:  text inside .sol-dropdown-content.display-text  → " Actions "
-    //    Fallback: aria-label on the [role="combobox"] inner element → "Actions"
-    var itemTypeEl = document.querySelector('.item-type-dropdown .sol-dropdown-content.display-text');
-    if (!itemTypeEl) {
-      itemTypeEl = document.querySelector('.item-type-dropdown [role="combobox"]');
-    }
-    var itemType = '';
-    if (itemTypeEl) {
-      itemType = (itemTypeEl.textContent || itemTypeEl.getAttribute('aria-label') || '').trim();
-    }
-    if (itemType) parts.push(itemType.replace(/\s+/g, '_'));
 
     // Combine with underscores; fallback if nothing was found
     var name = parts.length > 0 ? parts.join('_') : 'CXOne_Intents_Output';
@@ -87,11 +148,55 @@
   // ── Step 1: Verify page ────────────────────────────────────────────────
   log('Starting CXOne Intent Scraper...');
 
-  const kanbanPanel = document.querySelector('.kanban-view-panel');
+  // Try multiple selectors in priority order; each waits up to 10 s
+  var KANBAN_CANDIDATES = [
+    '.kanban-view-panel',
+    '[class*="kanban-view"]',
+    '.kanban-panel',
+    '[class*="kanban"]',
+    'p-tree',
+  ];
+
+  var kanbanPanel = null;
+  var usedSelector = '';
+  for (var _kc = 0; _kc < KANBAN_CANDIDATES.length; _kc++) {
+    log('  Looking for: ' + KANBAN_CANDIDATES[_kc] + ' (up to 10 s)…');
+    kanbanPanel = await waitForElement(KANBAN_CANDIDATES[_kc], 10000);
+    if (kanbanPanel) { usedSelector = KANBAN_CANDIDATES[_kc]; break; }
+  }
+
   if (!kanbanPanel) {
-    logWarn('Could not find .kanban-view-panel. Are you on the Intent Builder page?');
+    logWarn('Could not find the Intent Builder panel in main document or any iframe.');
+    var _dbgKanban = document.querySelectorAll('[class*="kanban"]');
+    logWarn('  Main doc — elements with "kanban" in class: ' + _dbgKanban.length);
+    var _dbgFrames = document.querySelectorAll('iframe');
+    logWarn('  iframes on page: ' + _dbgFrames.length);
+    for (var _dfi = 0; _dfi < Math.min(_dbgFrames.length, 8); _dfi++) {
+      try {
+        var _dfd = _dbgFrames[_dfi].contentDocument ||
+                   (_dbgFrames[_dfi].contentWindow && _dbgFrames[_dfi].contentWindow.document);
+        if (_dfd) {
+          var _dfk = _dfd.querySelectorAll('[class*="kanban"]');
+          logWarn('    iframe[' + _dfi + '] accessible, kanban elements: ' + _dfk.length +
+                  ((_dbgFrames[_dfi].src || '').length ? ' (src: ' + _dbgFrames[_dfi].src.substring(0, 60) + ')' : ''));
+        } else {
+          logWarn('    iframe[' + _dfi + '] document not accessible');
+        }
+      } catch (_de) {
+        logWarn('    iframe[' + _dfi + '] CROSS-ORIGIN — blocked. src: ' + (_dbgFrames[_dfi].src || '').substring(0, 60));
+        logWarn('    --> Switch the console frame selector (top-left dropdown in DevTools) to this iframe and re-run.');
+      }
+    }
+    logWarn('Make sure the Intent Builder page is fully loaded and the tree is visible.');
     return;
   }
+  log('  Panel found via selector: "' + usedSelector + '"');
+
+  // ── Capture filename NOW while the page is in its original state ───────
+  // (activeDoc is now set to the correct frame, company name / model / date
+  //  are all visible before any intent clicks alter the page)
+  var baseFileName = buildFileName();
+  log('  Filename will be: ' + baseFileName);
 
   // ── Step 2: Expand all collapsed tree nodes ────────────────────────────
   log('Step 1/4: Expanding all collapsed tree nodes...');
@@ -188,7 +293,7 @@
     await sleep(CLICK_DELAY);
 
     // Read phrases from the detail panel
-	const phrasesContainer = document.querySelector('.phrases-snippets-container');
+	const phrasesContainer = activeDoc.querySelector('.phrases-snippets-container');
 	if (phrasesContainer) {
 	  // Target specific phrase containers or rows if possible. 
 	  // If the structure is generic, we use a more inclusive text-grabbing method:
@@ -238,7 +343,6 @@
 
   // ── Step 5: Download ───────────────────────────────────────────────────
   log('Step 4/4: Generating Excel file...');
-  var baseFileName = buildFileName();
   log('  Filename: ' + baseFileName);
   downloadExcel(rows, baseFileName);
 
@@ -264,8 +368,8 @@
   // ────────────────────────────────────────────────────────────────────────
 
   function downloadExcel(data, baseFileName) {
-    var headers = ['Category','Topic','Intent','Intent Percentage','Volume','Examples','Tag'];
-    var keys = ['category','topic','intent','intentPercentage','volume','examples','tag'];
+    var headers = ['Category','Topic','Intent','Intent Percentage','Volume','Examples','Tag','Recommended Changes','Merge to Intent (L3)','Move to Topic (L2)','Updated Intent Name (L3)','Notes','Assign'];
+    var keys = ['category','topic','intent','intentPercentage','volume','examples','tag','recommendedChanges','mergeToIntent','moveToTopic','updatedIntentName','notes','assign'];
 
     function esc(s) {
       if (s == null) return '';
@@ -313,7 +417,7 @@
     var sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
       '<sheetViews><sheetView tabSelected="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' +
-      '<cols><col min="1" max="1" width="25" customWidth="1"/><col min="2" max="2" width="30" customWidth="1"/><col min="3" max="3" width="45" customWidth="1"/><col min="4" max="4" width="18" customWidth="1"/><col min="5" max="5" width="12" customWidth="1"/><col min="6" max="6" width="60" customWidth="1"/><col min="7" max="7" width="10" customWidth="1"/></cols>' +
+      '<cols><col min="1" max="1" width="25" customWidth="1"/><col min="2" max="2" width="30" customWidth="1"/><col min="3" max="3" width="45" customWidth="1"/><col min="4" max="4" width="18" customWidth="1"/><col min="5" max="5" width="12" customWidth="1"/><col min="6" max="6" width="60" customWidth="1"/><col min="7" max="7" width="10" customWidth="1"/><col min="8" max="8" width="25" customWidth="1"/><col min="9" max="9" width="25" customWidth="1"/><col min="10" max="10" width="25" customWidth="1"/><col min="11" max="11" width="25" customWidth="1"/><col min="12" max="12" width="20" customWidth="1"/><col min="13" max="13" width="20" customWidth="1"/></cols>' +
       '<sheetData>' + sr + '</sheetData>' +
       '<autoFilter ref="A1:' + lc + lr + '"/></worksheet>';
 
