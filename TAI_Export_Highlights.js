@@ -64,6 +64,19 @@
     var dateStr = dateEl ? dateEl.textContent.trim() : '';
     if (dateStr) parts.push(dateStr.replace(/\s+/g, '_'));
 
+    // 4. Item type from the "Actions / Intents" dropdown (.item-type-dropdown)
+    //    Primary:  text inside .sol-dropdown-content.display-text  → " Actions "
+    //    Fallback: aria-label on the [role="combobox"] inner element → "Actions"
+    var itemTypeEl = document.querySelector('.item-type-dropdown .sol-dropdown-content.display-text');
+    if (!itemTypeEl) {
+      itemTypeEl = document.querySelector('.item-type-dropdown [role="combobox"]');
+    }
+    var itemType = '';
+    if (itemTypeEl) {
+      itemType = (itemTypeEl.textContent || itemTypeEl.getAttribute('aria-label') || '').trim();
+    }
+    if (itemType) parts.push(itemType.replace(/\s+/g, '_'));
+
     // Combine with underscores; fallback if nothing was found
     var name = parts.length > 0 ? parts.join('_') : 'CXOne_Intents_Output';
     // Remove any characters that are unsafe for filenames
