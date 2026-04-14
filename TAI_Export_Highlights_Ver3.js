@@ -80,16 +80,21 @@
   function buildFileName() {
     var parts = [];
 
-    // 1. Company name from aptrinsic('identify', ...) script
+    // ── 1. Company name — tried in priority order until one succeeds ──────
     var companyName = '';
-    var scripts = document.querySelectorAll('script');
-    for (var s = 0; s < scripts.length; s++) {
-      var text = scripts[s].textContent || '';
-      var match = text.match(/aptrinsic\s*\(\s*['"]identify['"]\s*,[\s\S]*?,\s*\{[^}]*"name"\s*:\s*"([^"]+)"/);
-      if (match) { companyName = match[1].trim(); log('  Company (aptrinsic): ' + companyName); break; }
+
+    // 1a. aptrinsic('identify', ...) in scripts of BOTH top-level doc AND iframe
+    var _allScripts = Array.from(document.querySelectorAll('script'));
+    if (activeDoc !== document) {
+      _allScripts = _allScripts.concat(Array.from(activeDoc.querySelectorAll('script')));
+    }
+    for (var s = 0; s < _allScripts.length; s++) {
+      var _st = _allScripts[s].textContent || '';
+      var _sm = _st.match(/aptrinsic\s*\(\s*['"]identify['"]\s*,[\s\S]*?,\s*\{[^}]*"name"\s*:\s*"([^"]+)"/);
+      if (_sm) { companyName = _sm[1].trim(); log('  Company (aptrinsic script): ' + companyName); break; }
     }
 
-    // Fallback: scan action-bar selectors for "on tenant <NAME>"
+    // 1b. Action-bar elements with "on tenant <NAME>" (top-level doc)
     if (!companyName) {
       var _barSelectors = [
         '.cxone-action-bar .bar-label',
@@ -108,12 +113,75 @@
       }
     }
 
-    // Last resort: scan every <label> on the page
+    // 1c. Page <title> — CXone titles often contain the tenant/company name
+    //     e.g. "Intent Builder | Acme Corp" or "Acme Corp - NICE CXone"
+    if (!companyName) {
+      var _title = document.title || '';
+      log('  Page title: "' + _title + '"');
+      var _titleParts = _title.split(/\s*[|\-–]\s*/);
+      var _GENERIC = /^(nice|cxone|cxone\s*intent|intent\s*builder|topic\s*ai|home|login|loading)$/i;
+      for (var _tp = 0; _tp < _titleParts.length; _tp++) {
+        var _tc = _titleParts[_tp].trim();
+        if (_tc && !_GENERIC.test(_tc)) {
+          companyName = _tc;
+          log('  Company (page title): ' + companyName);
+          break;
+        }
+      }
+    }
+
+    // 1d. localStorage / sessionStorage — CXone may store tenant info there
+    if (!companyName) {
+      var _storageKeys = [
+        'tenantName','companyName','tenant','company','accountName',
+        'organizationName','tenantAlias','businessUnit','buName',
+      ];
+      for (var _sk = 0; _sk < _storageKeys.length; _sk++) {
+        try {
+          var _sv = localStorage.getItem(_storageKeys[_sk]) ||
+                    sessionStorage.getItem(_storageKeys[_sk]);
+          if (_sv && _sv.length > 1 && _sv.length < 120 && _sv[0] !== '{') {
+            companyName = _sv.trim();
+            log('  Company (storage["' + _storageKeys[_sk] + '"]): ' + companyName);
+            break;
+          }
+        } catch(_e) { /* storage may be blocked in some environments */ }
+      }
+    }
+
+    // 1e. Broader DOM scan for "on tenant <NAME>" — check both documents,
+    //     targeting small leaf-ish elements to avoid grabbing huge text blocks
+    if (!companyName) {
+      var _docsToScan = [document];
+      if (activeDoc !== document) _docsToScan.push(activeDoc);
+      outer:
+      for (var _di = 0; _di < _docsToScan.length; _di++) {
+        var _scanEls = _docsToScan[_di].querySelectorAll(
+          'label, span, p, li, td, div[class*="tenant"], div[class*="company"], ' +
+          'div[class*="account"], div[class*="user"], header *, nav *'
+        );
+        log('  DOM scan (' + (_di === 0 ? 'top doc' : 'iframe') + '): ' + _scanEls.length + ' elements');
+        for (var _ei = 0; _ei < _scanEls.length; _ei++) {
+          var _el = _scanEls[_ei];
+          if (_el.children.length > 3) continue; // skip container elements
+          var _et = _el.textContent.trim();
+          if (!_et || _et.length > 150) continue;
+          var _em = _et.match(/on tenant\s+(.+)/i);
+          if (_em) {
+            companyName = _em[1].trim();
+            log('  Company (DOM scan): ' + companyName);
+            break outer;
+          }
+        }
+      }
+    }
+
+    // 1f. Last resort: scan all <label> elements (original behaviour)
     if (!companyName) {
       var _allLabels = document.querySelectorAll('label');
       log('  Scanning all ' + _allLabels.length + ' <label> elements for "on tenant"…');
-      for (var _li = 0; _li < _allLabels.length; _li++) {
-        var _lt = _allLabels[_li].textContent.trim();
+      for (var _li2 = 0; _li2 < _allLabels.length; _li2++) {
+        var _lt = _allLabels[_li2].textContent.trim();
         var _lm = _lt.match(/on tenant\s+(.+)/i);
         if (_lm) { companyName = _lm[1].trim(); log('  Company (label scan): ' + companyName); break; }
       }
